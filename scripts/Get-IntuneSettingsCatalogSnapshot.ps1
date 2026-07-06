@@ -1,3 +1,4 @@
+#requires -Version 5.1
 <#
 Get-IntuneSettingsCatalogSnapshot.ps1
 
@@ -16,6 +17,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
+
 . "$PSScriptRoot/IntuneBackup.Common.ps1"
 
 Initialize-IntuneBackup -OutputPath $OutputPath
@@ -50,7 +54,7 @@ foreach ($policy in $policies) {
     }
 
     $file = Join-Path $script:JsonPath ("{0}__{1}.json" -f (Get-SafeFileName -Name $policy.name), $policy.id)
-    $snapshot | ConvertTo-Json -Depth 20 | Set-Content -Path $file -Encoding utf8
+    Write-TextFile -Path $file -Text ($snapshot | ConvertTo-Json -Depth 20)
 }
 
 Write-Host "Done. JSON snapshots written to: $script:JsonPath"

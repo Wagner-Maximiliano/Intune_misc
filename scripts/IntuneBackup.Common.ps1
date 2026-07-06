@@ -39,6 +39,27 @@ function Get-Prop {
     return $null
 }
 
+function Write-TextFile {
+    <#
+        Writes UTF-8 WITHOUT a BOM. Windows PowerShell 5.1's
+        `Set-Content -Encoding utf8` emits a BOM, which can make a later
+        ConvertFrom-Json fail; this keeps files clean and identical across
+        5.1 and 7.
+    #>
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+    $enc = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($Path, $Text, $enc)
+}
+
+function ConvertFrom-JsonFile {
+    <# Reads a JSON file, strips a leading BOM if present, returns the object. #>
+    param([Parameter(Mandatory)][string]$Path)
+    $raw = Get-Content -Path $Path -Raw
+    if ($raw) { $raw = $raw.TrimStart([char]0xFEFF) }  # strip UTF-8 BOM if present
+    if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+    return ($raw | ConvertFrom-Json)
+}
+
 # --- Paths / caches -----------------------------------------------------------
 
 function Initialize-IntuneBackup {
@@ -69,17 +90,19 @@ function Initialize-IntuneBackup {
 
     if (Test-Path $script:DefinitionsFile) {
         try {
-            $raw = Get-Content -Path $script:DefinitionsFile -Raw | ConvertFrom-Json
-            foreach ($prop in $raw.PSObject.Properties) {
-                $options = @{}
-                if ($prop.Value.Options) {
-                    foreach ($o in $prop.Value.Options.PSObject.Properties) {
-                        $options[$o.Name] = $o.Value
+            $raw = ConvertFrom-JsonFile -Path $script:DefinitionsFile
+            if ($raw) {
+                foreach ($prop in $raw.PSObject.Properties) {
+                    $options = @{}
+                    if ($prop.Value.Options) {
+                        foreach ($o in $prop.Value.Options.PSObject.Properties) {
+                            $options[$o.Name] = $o.Value
+                        }
                     }
-                }
-                $script:DefinitionCache[$prop.Name] = [pscustomobject]@{
-                    DisplayName = $prop.Value.DisplayName
-                    Options     = $options
+                    $script:DefinitionCache[$prop.Name] = [pscustomobject]@{
+                        DisplayName = $prop.Value.DisplayName
+                        Options     = $options
+                    }
                 }
             }
             Write-Verbose "Loaded $($script:DefinitionCache.Count) cached setting definitions."
@@ -105,7 +128,7 @@ function Save-DefinitionCache {
         foreach ($ok in ($def.Options.Keys | Sort-Object)) { $opts[$ok] = $def.Options[$ok] }
         $out[$key] = [ordered]@{ DisplayName = $def.DisplayName; Options = $opts }
     }
-    $out | ConvertTo-Json -Depth 10 | Set-Content -Path $script:DefinitionsFile -Encoding utf8
+    Write-TextFile -Path $script:DefinitionsFile -Text ($out | ConvertTo-Json -Depth 10)
 }
 
 # --- Graph plumbing -----------------------------------------------------------
@@ -150,19 +173,21 @@ function Get-MgGraphAllPages {
                     if ($ra -gt 0) { $delay = $ra }
                 } catch { }
 
+                $delay = [int][math]::Ceiling($delay)
                 Write-Warning "Graph request '$nextUri' failed (status=$status, attempt=$attempt/$MaxRetries). Retrying in ${delay}s."
                 Start-Sleep -Seconds $delay
             }
         }
 
-        if ($response.ContainsKey('value')) {
-            if ($response.value) { $results.AddRange([object[]]$response.value) }
+        if (Test-HasProp $response 'value') {
+            $val = Get-Prop $response 'value'
+            if ($val) { $results.AddRange([object[]]$val) }
         }
         else {
             $results.Add($response)
         }
 
-        $nextUri = if ($response.ContainsKey('@odata.nextLink')) { $response.'@odata.nextLink' } else { $null }
+        $nextUri = Get-Prop $response '@odata.nextLink'
     }
 
     return $results
@@ -428,8 +453,8 @@ function Read-Manifest {
     $manifest = @{}
     if (Test-Path $script:ManifestFile) {
         try {
-            $raw = Get-Content -Path $script:ManifestFile -Raw | ConvertFrom-Json
-            foreach ($prop in $raw.PSObject.Properties) { $manifest[$prop.Name] = $prop.Value }
+            $raw = ConvertFrom-JsonFile -Path $script:ManifestFile
+            if ($raw) { foreach ($prop in $raw.PSObject.Properties) { $manifest[$prop.Name] = $prop.Value } }
         }
         catch { Write-Warning "Could not read manifest; treating as empty. $_" }
     }
@@ -441,7 +466,7 @@ function Write-Manifest {
     param([Parameter(Mandatory)][hashtable]$Manifest)
     $out = [ordered]@{}
     foreach ($key in ($Manifest.Keys | Sort-Object)) { $out[$key] = $Manifest[$key] }
-    $out | ConvertTo-Json -Depth 10 | Set-Content -Path $script:ManifestFile -Encoding utf8
+    Write-TextFile -Path $script:ManifestFile -Text ($out | ConvertTo-Json -Depth 10)
 }
 
 # --- Audit (best effort) ------------------------------------------------------

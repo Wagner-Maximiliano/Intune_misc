@@ -1,3 +1,4 @@
+#requires -Version 5.1
 <#
 Backup-IntunePolicies.ps1
 
@@ -22,6 +23,12 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
+Import-Module ImportExcel -ErrorAction Stop
+# EPPlus/ImportExcel colouring uses System.Drawing; ensure it is loadable on 5.1.
+Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
+
 . "$PSScriptRoot/IntuneBackup.Common.ps1"
 
 Initialize-IntuneBackup -OutputPath $OutputPath
@@ -99,7 +106,7 @@ foreach ($policy in $policies) {
             if ($PSCmdlet.ShouldProcess($name, "Write snapshot ($status)")) {
                 # Authoritative JSON (the restore source of truth).
                 $jsonFile = Join-Path $script:JsonPath ("{0}__{1}.json" -f (Get-SafeFileName -Name $name), $id)
-                $snapshot | ConvertTo-Json -Depth 20 | Set-Content -Path $jsonFile -Encoding utf8
+                Write-TextFile -Path $jsonFile -Text ($snapshot | ConvertTo-Json -Depth 20)
 
                 # Human-readable workbook, new dated sheet with diff highlight.
                 $sheet = Export-PolicyWorkbook -Snapshot $snapshot -FlatSettings $flat -Date (Get-Date)

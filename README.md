@@ -36,6 +36,11 @@ Install-Module Pester -Scope CurrentUser
 Only `Microsoft.Graph.Authentication` (not the full Graph SDK) and `ImportExcel`
 are needed at runtime.
 
+**Compatibility:** the scripts target **Windows PowerShell 5.1** and also run on
+PowerShell 7. They avoid 7-only syntax, read/write UTF-8 without a BOM, and
+access all Graph response fields through a type-agnostic accessor so they work
+whether `Invoke-MgGraphRequest` returns a hashtable or an object.
+
 ## Usage
 
 Full backup with versioning (prompts for interactive sign-in):
