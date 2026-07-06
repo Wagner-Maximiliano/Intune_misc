@@ -8,7 +8,7 @@
 #>
 
 BeforeAll {
-    . "$PSScriptRoot/../scripts/IntuneBackup.Common.ps1"
+    . "$PSScriptRoot/TestHelpers.ps1"
 
     # Isolate caches/paths in a temp folder.
     $script:TmpOut = Join-Path ([System.IO.Path]::GetTempPath()) ("intunebackup_tests_" + [guid]::NewGuid())

@@ -1,18 +1,16 @@
 <#
-IntuneBackup.Common.ps1
+TestHelpers.ps1
 
-Shared helpers for the Intune policy backup/versioning scripts. Dot-source
-this file from an entry script:
+NOT part of the production scripts. This is a test-only mirror of the logic
+in scripts/Backup-IntunePolicies.ps1 (settings flattening, hashing, sheet
+naming, etc.), kept as reusable functions so the offline Pester suite in this
+folder can exercise that logic without a Graph connection or ImportExcel.
 
-    . "$PSScriptRoot/IntuneBackup.Common.ps1"
+You do not need this file to run the actual backup scripts - those are
+single, self-contained .ps1 files with no dependency on anything else.
+Dot-sourced only by IntuneBackup.Tests.ps1:
 
-No module manifest on purpose - a plain dot-sourced file keeps things simple
-and easy to iterate. Requires Microsoft.Graph.Authentication for the Graph
-calls and ImportExcel for the workbook export.
-
-Caches (group names, filter names, setting definitions) live in the script
-scope of whoever dot-sources this file and are initialized by
-Initialize-IntuneBackup.
+    . "$PSScriptRoot/TestHelpers.ps1"
 #>
 
 Set-StrictMode -Version Latest
