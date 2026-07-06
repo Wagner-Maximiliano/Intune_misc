@@ -56,11 +56,18 @@ saved script file.
 
 ## Usage
 
-Import the modules (see above), then, in the same session:
+Import the modules (see above). The scripts never force a new sign-in — they
+check `Get-MgContext` first and use whatever connection already exists in the
+session, so you can connect however you need to (e.g. a specific app
+registration) before running them:
 
 ```powershell
+Connect-MgGraph -ClientId <your app id> -TenantId <your tenant id>
 .\scripts\Backup-IntunePolicies.ps1 -OutputPath .\output
 ```
+
+If there's no existing connection when the script runs, it connects itself
+(interactive, delegated) with the scopes it needs.
 
 - `-WhatIf` — detect changes and print the summary without writing any files.
 - `-SkipAudit` — skip the "Last Modified By" audit lookup (fewer scopes needed).

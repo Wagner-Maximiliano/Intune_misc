@@ -16,7 +16,14 @@ yourself first, once per PowerShell session, before running the script:
 
     Import-Module Microsoft.Graph.Authentication
 
+CONNECTION - this script does NOT force a new Graph connection. It checks
+Get-MgContext first: if you're already connected (e.g. you ran Connect-MgGraph
+yourself with a specific app registration/ClientId), it uses that connection
+as-is and never calls Connect-MgGraph. It only connects itself when there is
+no existing connection.
+
 Usage (run the .ps1 file directly, don't paste it line-by-line):
+    Connect-MgGraph -ClientId <your app id> -TenantId <your tenant id>
     .\Get-IntuneSettingsCatalogSnapshot.ps1
     .\Get-IntuneSettingsCatalogSnapshot.ps1 -OutputPath C:\IntuneBackup
 #>
@@ -143,10 +150,17 @@ function Write-TextFile {
 # Main
 # ----------------------------------------------------------------------------
 
-$connectParams = @{ Scopes = @('DeviceManagementConfiguration.Read.All', 'Group.Read.All') }
-if ($TenantId) { $connectParams.TenantId = $TenantId }
-Connect-MgGraph @connectParams | Out-Null
-Write-Host "Connected to tenant: $((Get-MgContext).TenantId)"
+$existingContext = Get-MgContext
+if ($existingContext) {
+    Write-Host "Using existing Graph connection (Account: $($existingContext.Account), Tenant: $($existingContext.TenantId))."
+}
+else {
+    Write-Host 'No existing Graph connection found - connecting...'
+    $connectParams = @{ Scopes = @('DeviceManagementConfiguration.Read.All', 'Group.Read.All') }
+    if ($TenantId) { $connectParams.TenantId = $TenantId }
+    Connect-MgGraph @connectParams | Out-Null
+    Write-Host "Connected to tenant: $((Get-MgContext).TenantId)"
+}
 
 Write-Host 'Fetching Settings Catalog policies (settings + assignments inline)...'
 $expand   = 'settings($expand=settingDefinitions),assignments'
