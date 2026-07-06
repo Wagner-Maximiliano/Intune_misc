@@ -1,14 +1,12 @@
 <#
-Phase 1 pilot script for the Intune policy backup project.
+Get-IntuneSettingsCatalogSnapshot.ps1
 
-Connects to Microsoft Graph (delegated, interactive) and pulls every Settings
-Catalog policy (deviceManagement/configurationPolicies) along with its
-settings and assignments, then writes one JSON file per policy to
--OutputPath. No Excel output yet - this phase is only about proving the
-data we can retrieve is complete before we build the workbook export.
+Phase 1 (read-only) entry script: pulls every Settings Catalog policy with its
+settings and assignments in a single call and writes one authoritative JSON
+snapshot per policy to <OutputPath>/json. No Excel, no versioning - use
+Backup-IntunePolicies.ps1 for that.
 
-Requires the Microsoft.Graph.Authentication module (Install-Module
-Microsoft.Graph.Authentication -Scope CurrentUser).
+Requires: Microsoft.Graph.Authentication.
 #>
 
 [CmdletBinding()]
@@ -18,131 +16,42 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. "$PSScriptRoot/IntuneBackup.Common.ps1"
 
-function Get-MgGraphAllPages {
-    param([Parameter(Mandatory)][string]$Uri)
+Initialize-IntuneBackup -OutputPath $OutputPath
 
-    $results = [System.Collections.Generic.List[object]]::new()
-    $nextUri = $Uri
-
-    while ($nextUri) {
-        $response = Invoke-MgGraphRequest -Method GET -Uri $nextUri
-        if ($response.value) {
-            $results.AddRange($response.value)
-        }
-        elseif ($response) {
-            # Single-object response (no 'value' wrapper), used for sub-resources like /settings on some policy types
-            $results.Add($response)
-        }
-        $nextUri = $response.'@odata.nextLink'
-    }
-
-    return $results
-}
-
-function Get-GroupDisplayName {
-    param([string]$GroupId)
-
-    if (-not $script:GroupNameCache.ContainsKey($GroupId)) {
-        try {
-            $group = Invoke-MgGraphRequest -Method GET -Uri "v1.0/groups/$GroupId`?`$select=displayName"
-            $script:GroupNameCache[$GroupId] = $group.displayName
-        }
-        catch {
-            $script:GroupNameCache[$GroupId] = "<unresolved: $GroupId>"
-        }
-    }
-
-    return $script:GroupNameCache[$GroupId]
-}
-
-function Get-AssignmentFilterName {
-    param([string]$FilterId)
-
-    if (-not $FilterId) { return $null }
-
-    if (-not $script:FilterNameCache.ContainsKey($FilterId)) {
-        try {
-            $filter = Invoke-MgGraphRequest -Method GET -Uri "beta/deviceManagement/assignmentFilters/$FilterId`?`$select=displayName"
-            $script:FilterNameCache[$FilterId] = $filter.displayName
-        }
-        catch {
-            $script:FilterNameCache[$FilterId] = "<unresolved: $FilterId>"
-        }
-    }
-
-    return $script:FilterNameCache[$FilterId]
-}
-
-function Resolve-Assignment {
-    param($Assignment)
-
-    $target = $Assignment.target
-    $targetType = $target.'@odata.type' -replace '^#microsoft\.graph\.', ''
-
-    $groupId = $target.groupId
-    $groupName = if ($groupId) { Get-GroupDisplayName -GroupId $groupId } else { $null }
-
-    [pscustomobject]@{
-        AssignmentType = $targetType
-        GroupId        = $groupId
-        GroupName      = $groupName
-        FilterId       = $target.deviceAndAppManagementAssignmentFilterId
-        FilterName     = Get-AssignmentFilterName -FilterId $target.deviceAndAppManagementAssignmentFilterId
-        FilterType     = $target.deviceAndAppManagementAssignmentFilterType
-    }
-}
-
-# --- Main ---
-
-$script:GroupNameCache = @{}
-$script:FilterNameCache = @{}
-
-if (-not (Test-Path $OutputPath)) {
-    New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null
-}
-
-$connectParams = @{
-    Scopes = @(
-        'DeviceManagementConfiguration.Read.All'
-        'Group.Read.All'
-    )
-}
+$connectParams = @{ Scopes = @('DeviceManagementConfiguration.Read.All', 'Group.Read.All') }
 if ($TenantId) { $connectParams.TenantId = $TenantId }
-
 Connect-MgGraph @connectParams | Out-Null
 Write-Host "Connected to tenant: $((Get-MgContext).TenantId)"
 
-Write-Host 'Fetching Settings Catalog policies...'
-$policies = Get-MgGraphAllPages -Uri 'beta/deviceManagement/configurationPolicies'
+Write-Host 'Fetching Settings Catalog policies (settings + assignments inline)...'
+$expand = 'settings($expand=settingDefinitions),assignments'
+$policies = Get-MgGraphAllPages -Uri "beta/deviceManagement/configurationPolicies?`$expand=$expand"
 Write-Host "Found $($policies.Count) policies."
 
 foreach ($policy in $policies) {
     Write-Host "  - $($policy.name) ($($policy.id))"
 
-    $settings = Get-MgGraphAllPages -Uri "beta/deviceManagement/configurationPolicies/$($policy.id)/settings"
-    $rawAssignments = Get-MgGraphAllPages -Uri "beta/deviceManagement/configurationPolicies/$($policy.id)/assignments"
-    $assignments = $rawAssignments | ForEach-Object { Resolve-Assignment -Assignment $_ }
+    $assignments = @($policy.assignments) | ForEach-Object { Resolve-Assignment -Assignment $_ }
 
     $snapshot = [pscustomobject]@{
-        PolicyType  = 'SettingsCatalog'
-        Id          = $policy.id
-        Name        = $policy.name
-        Description = $policy.description
-        Platforms   = $policy.platforms
-        Technologies = $policy.technologies
+        PolicyType           = 'SettingsCatalog'
+        Id                   = $policy.id
+        Name                 = $policy.name
+        Description          = $policy.description
+        Platforms            = $policy.platforms
+        Technologies         = $policy.technologies
         CreatedDateTime      = $policy.createdDateTime
         LastModifiedDateTime = $policy.lastModifiedDateTime
-        Assignments = $assignments
-        Settings    = $settings
-        RetrievedAt = (Get-Date).ToString('o')
+        Assignments          = $assignments
+        Settings             = $policy.settings
+        RetrievedAt          = (Get-Date).ToString('o')
     }
 
-    $safeName = ($policy.name -replace '[\\/:*?"<>|]', '_')
-    $fileName = "SettingsCatalog_${safeName}_$($policy.id).json"
-    $filePath = Join-Path $OutputPath $fileName
-
-    $snapshot | ConvertTo-Json -Depth 20 | Set-Content -Path $filePath -Encoding utf8
+    $file = Join-Path $script:JsonPath ("{0}__{1}.json" -f (Get-SafeFileName -Name $policy.name), $policy.id)
+    $snapshot | ConvertTo-Json -Depth 20 | Set-Content -Path $file -Encoding utf8
 }
 
-Write-Host "Done. Snapshots written to: $OutputPath"
+Write-Host "Done. JSON snapshots written to: $script:JsonPath"
+Save-DefinitionCache
