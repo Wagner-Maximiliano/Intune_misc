@@ -26,12 +26,18 @@ Usage (run the .ps1 file directly, don't paste it line-by-line):
     Connect-MgGraph -ClientId <your app id> -TenantId <your tenant id>
     .\Get-IntuneSettingsCatalogSnapshot.ps1
     .\Get-IntuneSettingsCatalogSnapshot.ps1 -OutputPath C:\IntuneBackup
+    .\Get-IntuneSettingsCatalogSnapshot.ps1 -Platform Windows
 #>
 
 [CmdletBinding()]
 param(
     [string]$OutputPath = '.\output',
-    [string]$TenantId
+    [string]$TenantId,
+
+    # Which policies to include, by platform. 'All' (default) processes every
+    # Settings Catalog policy regardless of platform.
+    [ValidateSet('All', 'Windows', 'iOS', 'Android', 'macOS', 'Linux')]
+    [string]$Platform = 'All'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -166,6 +172,23 @@ Write-Host 'Fetching Settings Catalog policies (settings + assignments inline)..
 $expand   = 'settings($expand=settingDefinitions),assignments'
 $policies = Get-MgGraphAllPages -Uri "beta/deviceManagement/configurationPolicies?`$expand=$expand"
 Write-Host "Found $($policies.Count) policies."
+
+if ($Platform -ne 'All') {
+    # Settings Catalog's 'platforms' field values: windows10 / windows10X,
+    # iOS, android / androidEnterprise, macOS, linux. Wildcard match on the
+    # Windows/Android prefixes so variant values are still caught.
+    $platformPatterns = @{
+        'Windows' = 'windows*'
+        'iOS'     = 'iOS'
+        'Android' = 'android*'
+        'macOS'   = 'macOS'
+        'Linux'   = 'linux'
+    }
+    $pattern     = $platformPatterns[$Platform]
+    $countBefore = $policies.Count
+    $policies    = @($policies | Where-Object { $_.platforms -like $pattern })
+    Write-Host "Filtered to platform '$Platform': $($policies.Count) of $countBefore policies match."
+}
 
 foreach ($policy in $policies) {
     Write-Host "  - $($policy.name) ($($policy.id))"

@@ -71,6 +71,9 @@ If there's no existing connection when the script runs, it connects itself
 
 - `-WhatIf` — detect changes and print the summary without writing any files.
 - `-SkipAudit` — skip the "Last Modified By" audit lookup (fewer scopes needed).
+- `-Platform <All|Windows|iOS|Android|macOS|Linux>` — only process policies for
+  that platform (default `All`). E.g. `-Platform Windows` skips iOS/Android/etc.
+  entirely — nothing for those platforms is written to JSON, Excel, or the index.
 
 Delegated scopes requested: `DeviceManagementConfiguration.Read.All`,
 `Group.Read.All`, and (unless `-SkipAudit`) `DeviceManagementApps.Read.All`
