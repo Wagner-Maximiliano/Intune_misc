@@ -22,6 +22,7 @@ cheap and only real edits create new sheets.
 |------|---------|
 | `scripts/Get-IntuneSettingsCatalogSnapshot.ps1` | Phase 1: read-only JSON pull, no Excel/versioning. **Single, self-contained file.** |
 | `scripts/Backup-IntunePolicies.ps1` | Phase 2+3: JSON + versioned Excel workbooks + master index + run summary. **Single, self-contained file.** |
+| `scripts/Export-PolicySummary.ps1` | Reads JSON snapshots and builds a single one-row-per-policy review workbook. No Graph connection needed. **Single, self-contained file.** |
 | `tests/` | Offline Pester tests, for development only — not needed to run the scripts above. |
 
 Each script under `scripts/` is a standalone `.ps1` file — everything it
@@ -107,6 +108,24 @@ above a `Path | Setting | Configured Value` table. When a new version is added,
 rows are highlighted vs. the previous sheet — **green** added, **amber**
 changed, **red** removed. A hidden `Meta` sheet points back to the
 authoritative JSON.
+
+## Quick review: one-row-per-policy summary
+
+`Export-PolicySummary.ps1` reads the JSON snapshots (no Graph connection
+needed - group/filter names are already resolved inside the JSON) and builds
+a single workbook with one row per policy: name, created, last modified,
+assigned groups/filters, excluded groups/filters.
+
+```powershell
+Import-Module ImportExcel
+.\scripts\Export-PolicySummary.ps1 -JsonPath .\output\json
+```
+
+Point `-JsonPath` at the whole `json/` folder or at a single run's timestamped
+subfolder - it searches recursively either way. Since a policy only gets a new
+JSON file in a run when it actually changed, the script keeps whichever
+snapshot is most recent per policy (by `RetrievedAt`), so you always get a
+complete, current picture rather than just one run's partial delta.
 
 ## Tests (run offline, no tenant needed)
 
