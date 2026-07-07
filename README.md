@@ -23,6 +23,7 @@ cheap and only real edits create new sheets.
 | `scripts/Get-IntuneSettingsCatalogSnapshot.ps1` | Phase 1: read-only JSON pull, no Excel/versioning. **Single, self-contained file.** |
 | `scripts/Backup-IntunePolicies.ps1` | Phase 2+3: JSON + versioned Excel workbooks + master index + run summary. **Single, self-contained file.** |
 | `scripts/Export-PolicySummary.ps1` | Reads JSON snapshots and builds a single one-row-per-policy review workbook. No Graph connection needed. **Single, self-contained file.** |
+| `scripts/Restore-IntunePolicy.ps1` | Phase 5: creates a brand new policy in Intune from a JSON snapshot. **Single, self-contained file.** |
 | `tests/` | Offline Pester tests, for development only — not needed to run the scripts above. |
 
 Each script under `scripts/` is a standalone `.ps1` file — everything it
@@ -127,6 +128,36 @@ JSON file in a run when it actually changed, the script keeps whichever
 snapshot is most recent per policy (by `RetrievedAt`), so you always get a
 complete, current picture rather than just one run's partial delta.
 
+## Restoring a policy from a snapshot
+
+`Restore-IntunePolicy.ps1` creates a **brand new** Settings Catalog policy in
+Intune from one JSON snapshot file. It is intentionally narrow in scope:
+
+- **Create-only, never overwrite.** It always `POST`s a new policy with its
+  own new Id — it never patches or replaces an existing one, even if the
+  original policy still exists.
+- **Never touches assignments.** It never calls `.../assign`. The new policy
+  comes out completely unassigned, on purpose — a safety boundary, not a
+  missing feature. It prints the original policy's assignments (groups and
+  filters, already resolved in the JSON) so you can re-apply them by hand in
+  the Intune portal.
+- **Naming:** by default the restored policy is named
+  `<original name> (restored yyyy-MM-dd)` so it's never confused with a
+  still-live original of the same name. Use `-NewName` for an exact name, or
+  `-UseOriginalName` to reproduce the original name verbatim.
+
+```powershell
+Import-Module Microsoft.Graph.Authentication
+Connect-MgGraph -ClientId <your app id> -TenantId <your tenant id>
+.\scripts\Restore-IntunePolicy.ps1 -JsonFile .\output\json\2026-07-08_143022\MyPolicy__<id>.json
+.\scripts\Restore-IntunePolicy.ps1 -JsonFile <path> -WhatIf
+```
+
+This is the first script in the project that writes to Intune, so it
+requests `DeviceManagementConfiguration.ReadWrite.All` (the other scripts
+only ever request `.Read.All`). It supports `-WhatIf` to print exactly what
+would be created (name, platform, settings count) without making the call.
+
 ## Tests (run offline, no tenant needed)
 
 ```powershell
@@ -154,8 +185,9 @@ round-trip.
 3. **Phase 3** ✅ — versioning (dated sheets, hash dedup, diff highlight, audit).
 4. **Phase 4** — scheduled task on a management server: app-only cert auth,
    logging, alerting (retry/backoff already built into the paging layer).
-5. **Phase 5** — restore / "create policy from template": re-POST a stored JSON
-   snapshot to Graph (strip read-only fields).
+5. **Phase 5** ✅ — restore / "create policy from template": re-POST a stored
+   JSON snapshot to Graph as a brand new, unassigned policy (original
+   assignments are printed for manual re-application).
 6. **Phase 6** — database + internal web page (the `_Index` row shape is the
    intended schema).
 
