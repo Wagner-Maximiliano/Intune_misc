@@ -458,7 +458,16 @@ function Export-PolicyWorkbook {
             $dateSheets = @($existingNames | Where-Object { $_ -match '^\d{4}-\d{2}-\d{2}' } | Sort-Object)
             if ($dateSheets.Count -gt 0) {
                 $prevName = $dateSheets[-1]
-                $prevRows = @(Import-Excel -ExcelPackage $pkgInfo -WorksheetName $prevName -StartRow $settingsTableRow)
+                try {
+                    $prevRows = @(Import-Excel -ExcelPackage $pkgInfo -WorksheetName $prevName -StartRow $settingsTableRow)
+                }
+                catch {
+                    # Don't let a bad/unreadable previous sheet kill the whole
+                    # policy - fall back to "no prior version" so this run
+                    # still writes a fresh sheet, just without diff colouring.
+                    Write-Warning "Could not read previous sheet '$prevName' in '$path' for diffing - writing this version without change highlighting. $_"
+                    $prevRows = @()
+                }
             }
         }
         finally { Close-ExcelPackage $pkgInfo -NoSave }
@@ -688,7 +697,7 @@ foreach ($policy in $policies) {
     }
     catch {
         $status = 'errored'
-        Write-Warning "Policy '$name' ($id) failed: $_"
+        Write-Warning "Policy '$name' ($id) failed at line $($_.InvocationInfo.ScriptLineNumber): $_"
     }
 
     Write-Host ("  [{0,-8}] {1}" -f $status, $name)
