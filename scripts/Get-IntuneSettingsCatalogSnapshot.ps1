@@ -133,6 +133,13 @@ function Resolve-Assignment {
     $filterId   = $target.deviceAndAppManagementAssignmentFilterId
     $filterType = $target.deviceAndAppManagementAssignmentFilterType
 
+    # Intune represents "no filter" as the all-zero GUID with type 'none',
+    # not as a blank/null value - treat that as no filter rather than trying
+    # (and failing) to resolve it as a real one.
+    if ($filterType -eq 'none' -or $filterId -eq '00000000-0000-0000-0000-000000000000') {
+        $filterId = $null
+    }
+
     [pscustomobject]@{
         AssignmentType = $targetType   # groupAssignmentTarget | exclusionGroupAssignmentTarget | allDevicesAssignmentTarget | allLicensedUsersAssignmentTarget
         IsExclude      = ($targetType -eq 'exclusionGroupAssignmentTarget')
@@ -172,8 +179,8 @@ else {
     Write-Host "Connected to tenant: $((Get-MgContext).TenantId)"
 }
 
-Write-Host 'Fetching Settings Catalog policies (settings + assignments inline)...'
-$expand   = 'settings($expand=settingDefinitions),assignments'
+Write-Host 'Fetching Settings Catalog policies (settings inline)...'
+$expand   = 'settings($expand=settingDefinitions)'
 $policies = Get-MgGraphAllPages -Uri "beta/deviceManagement/configurationPolicies?`$expand=$expand"
 Write-Host "Found $($policies.Count) policies."
 
@@ -197,7 +204,13 @@ if ($Platform -ne 'All') {
 foreach ($policy in $policies) {
     Write-Host "  - $($policy.name) ($($policy.id))"
 
-    $assignments = @($policy.assignments) | ForEach-Object { Resolve-Assignment -Assignment $_ }
+    # Fetched via a dedicated per-policy call rather than $expand=assignments
+    # on the list call above: $expand on this navigation property has been
+    # observed to return a thinner assignment target object that omits the
+    # device filter fields (deviceAndAppManagementAssignmentFilterId/Type).
+    # The dedicated endpoint returns the full target object.
+    $rawAssignments = Get-MgGraphAllPages -Uri "beta/deviceManagement/configurationPolicies/$($policy.id)/assignments"
+    $assignments = @($rawAssignments) | ForEach-Object { Resolve-Assignment -Assignment $_ }
 
     $snapshot = [pscustomobject]@{
         PolicyType           = 'SettingsCatalog'

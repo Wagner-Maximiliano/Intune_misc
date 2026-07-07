@@ -4,10 +4,11 @@
 Backup-IntunePolicies.ps1
 
 Connects to Microsoft Graph, pulls every Settings Catalog policy (settings +
-definitions + assignments in one call), writes the authoritative JSON
-snapshot, and appends a new dated worksheet to each policy's Excel workbook
-ONLY when the policy has actually changed since the last run. Rebuilds a
-master _Index.xlsx and prints a run summary.
+definitions inline, assignments via a dedicated per-policy call - $expand on
+assignments was found to omit device filter fields), writes the authoritative
+JSON snapshot, and appends a new dated worksheet to each policy's Excel
+workbook ONLY when the policy has actually changed since the last run.
+Rebuilds a master _Index.xlsx and prints a run summary.
 
 This is a single, self-contained file. There is nothing else to dot-source
 and no other file it depends on.
@@ -197,6 +198,13 @@ function Resolve-Assignment {
     $groupId    = $target.groupId
     $filterId   = $target.deviceAndAppManagementAssignmentFilterId
     $filterType = $target.deviceAndAppManagementAssignmentFilterType
+
+    # Intune represents "no filter" as the all-zero GUID with type 'none',
+    # not as a blank/null value - treat that as no filter rather than trying
+    # (and failing) to resolve it as a real one.
+    if ($filterType -eq 'none' -or $filterId -eq '00000000-0000-0000-0000-000000000000') {
+        $filterId = $null
+    }
 
     [pscustomobject]@{
         AssignmentType = $targetType
@@ -595,8 +603,8 @@ else {
     Write-Host "Connected to tenant: $((Get-MgContext).TenantId)"
 }
 
-Write-Host 'Fetching Settings Catalog policies (settings + assignments inline)...'
-$expand   = 'settings($expand=settingDefinitions),assignments'
+Write-Host 'Fetching Settings Catalog policies (settings inline)...'
+$expand   = 'settings($expand=settingDefinitions)'
 $policies = Get-MgGraphAllPages -Uri "beta/deviceManagement/configurationPolicies?`$expand=$expand"
 Write-Host "Found $($policies.Count) policies."
 
@@ -634,7 +642,13 @@ foreach ($policy in $policies) {
             }
         }
 
-        $assignments = @($policy.assignments) | ForEach-Object { Resolve-Assignment -Assignment $_ }
+        # Fetched via a dedicated per-policy call rather than $expand=assignments
+        # on the list call above: $expand on this navigation property has been
+        # observed to return a thinner assignment target object that omits the
+        # device filter fields (deviceAndAppManagementAssignmentFilterId/Type).
+        # The dedicated endpoint returns the full target object.
+        $rawAssignments = Get-MgGraphAllPages -Uri "beta/deviceManagement/configurationPolicies/$id/assignments"
+        $assignments = @($rawAssignments) | ForEach-Object { Resolve-Assignment -Assignment $_ }
         $flat = ConvertTo-FlatSettings -Settings $policy.settings
         $hash = Get-PolicyContentHash -FlatSettings $flat -Assignments $assignments
 
