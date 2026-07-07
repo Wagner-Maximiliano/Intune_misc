@@ -50,7 +50,11 @@ $ErrorActionPreference = 'Stop'
 # Output folders + in-memory caches
 # ----------------------------------------------------------------------------
 
-$JsonPath        = Join-Path $OutputPath 'json'
+# Each run gets its own timestamped subfolder under json/, so re-running the
+# script never overwrites a previous run's snapshots - it's a version history
+# by folder, one run per timestamp.
+$RunTimestamp    = (Get-Date).ToString('yyyy-MM-dd_HHmmss')
+$JsonPath        = Join-Path (Join-Path $OutputPath 'json') $RunTimestamp
 $XlsxPath        = Join-Path $OutputPath 'xlsx'
 $StatePath       = Join-Path $OutputPath 'state'
 $ManifestFile    = Join-Path $StatePath 'manifest.json'
@@ -707,3 +711,4 @@ $summary | Group-Object Status | Sort-Object Name | ForEach-Object {
 }
 if ($WhatIfPreference) { Write-Host '(WhatIf: no files were written.)' }
 Write-Host "Output: $OutputPath"
+Write-Host "This run's JSON snapshots: $JsonPath"

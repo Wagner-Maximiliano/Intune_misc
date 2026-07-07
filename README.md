@@ -83,12 +83,20 @@ for audit events.
 
 ```
 output/
-  json/    <name>__<policyId>.json      # authoritative snapshot (restore source)
-  xlsx/    <name>__<policyId>.xlsx       # one dated sheet per version, diff-highlighted
-           _Index.xlsx                   # master list of all policies
-  state/   manifest.json                 # per-policy lastModified + contentHash
-           definitions.json              # cached setting definitions (reused across runs)
+  json/    <yyyy-MM-dd_HHmmss>/           # one subfolder per run - never overwritten
+             <name>__<policyId>.json      # authoritative snapshot (restore source)
+  xlsx/    <name>__<policyId>.xlsx        # one dated sheet per version, diff-highlighted
+           _Index.xlsx                    # master list of all policies
+  state/   manifest.json                  # per-policy lastModified + contentHash
+           definitions.json               # cached setting definitions (reused across runs)
 ```
+
+Every run creates a new `json/<timestamp>/` folder, so JSON snapshots build up
+as a version history across runs instead of overwriting each other. In
+`Backup-IntunePolicies.ps1`, a policy only gets a JSON file in a given run's
+folder if it actually changed (same rule as the Excel dated sheets); in
+`Get-IntuneSettingsCatalogSnapshot.ps1` (no change detection), every run writes
+every policy to its own timestamped folder.
 
 Each workbook sheet is a self-contained snapshot: a header block (name,
 description, type, dates, assigned/excluded groups, filters, last-modified-by)

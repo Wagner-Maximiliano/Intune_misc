@@ -42,7 +42,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$JsonPath = Join-Path $OutputPath 'json'
+# Each run gets its own timestamped subfolder under json/, so re-running the
+# script never overwrites a previous run's snapshots - it's a version history
+# by folder, one run per timestamp.
+$RunTimestamp = (Get-Date).ToString('yyyy-MM-dd_HHmmss')
+$JsonPath     = Join-Path (Join-Path $OutputPath 'json') $RunTimestamp
 if (-not (Test-Path $JsonPath)) { New-Item -ItemType Directory -Path $JsonPath -Force | Out-Null }
 
 $GroupNameCache  = @{}
