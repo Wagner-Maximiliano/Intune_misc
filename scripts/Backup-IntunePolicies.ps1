@@ -452,8 +452,11 @@ function Export-PolicyWorkbook {
         $pkgInfo = Open-ExcelPackage -Path $path
         try {
             $existingNames = @($pkgInfo.Workbook.Worksheets | ForEach-Object { $_.Name } | Where-Object { $_ -ne 'Meta' })
-            $dateSheets = $existingNames | Where-Object { $_ -match '^\d{4}-\d{2}-\d{2}' } | Sort-Object
-            if ($dateSheets) {
+            # Must stay wrapped in @(...): with exactly one match, an unwrapped
+            # pipeline collapses to a plain string, and [-1] on a string
+            # indexes its last CHARACTER, not the last array element.
+            $dateSheets = @($existingNames | Where-Object { $_ -match '^\d{4}-\d{2}-\d{2}' } | Sort-Object)
+            if ($dateSheets.Count -gt 0) {
                 $prevName = $dateSheets[-1]
                 $prevRows = @(Import-Excel -ExcelPackage $pkgInfo -WorksheetName $prevName -StartRow $settingsTableRow)
             }
@@ -490,10 +493,13 @@ function Export-PolicyWorkbook {
             $r++
         }
 
+        # Column order: Setting, Configured Value, Path (Path last). Diffing
+        # below reads $pr.Path / $pr.'Configured Value' by Import-Excel's
+        # header-name matching, so column order here doesn't affect that.
         $tableStart = $settingsTableRow
-        $ws.Cells[$tableStart, 1].Value = 'Path'
-        $ws.Cells[$tableStart, 2].Value = 'Setting'
-        $ws.Cells[$tableStart, 3].Value = 'Configured Value'
+        $ws.Cells[$tableStart, 1].Value = 'Setting'
+        $ws.Cells[$tableStart, 2].Value = 'Configured Value'
+        $ws.Cells[$tableStart, 3].Value = 'Path'
         1..3 | ForEach-Object { $ws.Cells[$tableStart, $_].Style.Font.Bold = $true }
 
         $prevByPath = @{}
@@ -502,9 +508,9 @@ function Export-PolicyWorkbook {
 
         $row = $tableStart + 1
         foreach ($s in $FlatSettings) {
-            $ws.Cells[$row, 1].Value = $s.Path
-            $ws.Cells[$row, 2].Value = $s.Title
-            $ws.Cells[$row, 3].Value = "$($s.Value)"
+            $ws.Cells[$row, 1].Value = $s.Title
+            $ws.Cells[$row, 2].Value = "$($s.Value)"
+            $ws.Cells[$row, 3].Value = $s.Path
 
             if ($havePrev) {
                 if (-not $prevByPath.ContainsKey($s.Path)) {
@@ -522,9 +528,9 @@ function Export-PolicyWorkbook {
             foreach ($s in $FlatSettings) { $currentPaths[$s.Path] = $true }
             foreach ($pr in $prevRows) {
                 if ($pr.Path -and -not $currentPaths.ContainsKey($pr.Path)) {
-                    $ws.Cells[$row, 1].Value = $pr.Path
-                    $ws.Cells[$row, 2].Value = '(removed)'
-                    $ws.Cells[$row, 3].Value = "$($pr.'Configured Value')"
+                    $ws.Cells[$row, 1].Value = '(removed)'
+                    $ws.Cells[$row, 2].Value = "$($pr.'Configured Value')"
+                    $ws.Cells[$row, 3].Value = $pr.Path
                     Set-CellColor -Worksheet $ws -Row $row -Color '#FFC7CE'   # removed -> red
                     $row++
                 }
