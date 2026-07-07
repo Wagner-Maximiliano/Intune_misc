@@ -74,6 +74,9 @@ If there's no existing connection when the script runs, it connects itself
 - `-Platform <All|Windows|iOS|Android|macOS|Linux>` — only process policies for
   that platform (default `All`). E.g. `-Platform Windows` skips iOS/Android/etc.
   entirely — nothing for those platforms is written to JSON, Excel, or the index.
+- `-SkipExcel` — write only the JSON snapshots; skip the per-policy workbook
+  and `_Index.xlsx` entirely. The `ImportExcel` module isn't needed at all when
+  using this. Change detection (the hash/manifest skip) still applies as normal.
 
 Delegated scopes requested: `DeviceManagementConfiguration.Read.All`,
 `Group.Read.All`, and (unless `-SkipAudit`) `DeviceManagementApps.Read.All`

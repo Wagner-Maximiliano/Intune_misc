@@ -16,7 +16,7 @@ MODULES REQUIRED - this script does NOT import them for you. Import these
 yourself first, once per PowerShell session, before running the script:
 
     Import-Module Microsoft.Graph.Authentication
-    Import-Module ImportExcel
+    Import-Module ImportExcel   # not needed at all if you use -SkipExcel
 
 CONNECTION - this script does NOT force a new Graph connection. It checks
 Get-MgContext first: if you're already connected (e.g. you ran Connect-MgGraph
@@ -29,6 +29,7 @@ Usage (run the .ps1 file directly, don't paste it line-by-line):
     .\Backup-IntunePolicies.ps1
     .\Backup-IntunePolicies.ps1 -OutputPath C:\IntuneBackup
     .\Backup-IntunePolicies.ps1 -Platform Windows
+    .\Backup-IntunePolicies.ps1 -SkipExcel
     .\Backup-IntunePolicies.ps1 -WhatIf
 #>
 
@@ -41,7 +42,11 @@ param(
     # Which policies to include, by platform. 'All' (default) processes every
     # Settings Catalog policy regardless of platform.
     [ValidateSet('All', 'Windows', 'iOS', 'Android', 'macOS', 'Linux')]
-    [string]$Platform = 'All'
+    [string]$Platform = 'All',
+
+    # Skip the Excel workbook / _Index.xlsx export entirely - only write the
+    # JSON snapshots. Also means the ImportExcel module is not required.
+    [switch]$SkipExcel
 )
 
 $ErrorActionPreference = 'Stop'
@@ -651,12 +656,14 @@ foreach ($policy in $policies) {
                 $jsonFile = Join-Path $JsonPath ("{0}__{1}.json" -f (Get-SafeFileName -Name $name), $id)
                 Write-TextFile -Path $jsonFile -Text ($snapshot | ConvertTo-Json -Depth 20)
 
-                $sheet = Export-PolicyWorkbook -Snapshot $snapshot -FlatSettings $flat -Date (Get-Date)
+                if (-not $SkipExcel) {
+                    $sheet = Export-PolicyWorkbook -Snapshot $snapshot -FlatSettings $flat -Date (Get-Date)
+                }
 
                 $Manifest[$id] = [ordered]@{
                     name           = $name
                     lastModified   = "$($policy.lastModifiedDateTime)"
-                    lastSheetName  = $sheet
+                    lastSheetName  = if ($sheet) { $sheet } elseif ($prev) { $prev.lastSheetName } else { '' }
                     contentHash    = $hash
                     lastModifiedBy = $modifiedBy
                 }
@@ -699,7 +706,7 @@ if ($PSCmdlet.ShouldProcess('output', 'Write manifest, index, definitions cache'
     }
     Write-TextFile -Path $DefinitionsFile -Text ($defsOut | ConvertTo-Json -Depth 10)
 
-    if ($indexRows.Count -gt 0) { Export-IndexWorkbook -Rows $indexRows | Out-Null }
+    if (-not $SkipExcel -and $indexRows.Count -gt 0) { Export-IndexWorkbook -Rows $indexRows | Out-Null }
 }
 
 # --- Summary ------------------------------------------------------------------
@@ -710,5 +717,6 @@ $summary | Group-Object Status | Sort-Object Name | ForEach-Object {
     Write-Host ("  {0,-8} : {1}" -f $_.Name, $_.Count)
 }
 if ($WhatIfPreference) { Write-Host '(WhatIf: no files were written.)' }
+if ($SkipExcel) { Write-Host '(SkipExcel: no workbook or index was written, JSON only.)' }
 Write-Host "Output: $OutputPath"
 Write-Host "This run's JSON snapshots: $JsonPath"
