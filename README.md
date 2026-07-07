@@ -24,6 +24,7 @@ cheap and only real edits create new sheets.
 | `scripts/Backup-IntunePolicies.ps1` | Phase 2+3: JSON + versioned Excel workbooks + master index + run summary. **Single, self-contained file.** |
 | `scripts/Export-PolicySummary.ps1` | Reads JSON snapshots and builds a single one-row-per-policy review workbook. No Graph connection needed. **Single, self-contained file.** |
 | `scripts/Restore-IntunePolicy.ps1` | Phase 5: creates a brand new policy in Intune from a JSON snapshot. **Single, self-contained file.** |
+| `scripts/Import-PolicyHistoryToDatabase.ps1` | Phase 6 (data layer): loads JSON snapshots into a SQLite version-history database. No Graph connection needed. **Single, self-contained file.** |
 | `tests/` | Offline Pester tests, for development only — not needed to run the scripts above. |
 
 Each script under `scripts/` is a standalone `.ps1` file — everything it
@@ -40,12 +41,13 @@ PowerShell session, before running the script:
 ```powershell
 Import-Module Microsoft.Graph.Authentication
 Import-Module ImportExcel   # only needed for Backup-IntunePolicies.ps1
+Import-Module PSSQLite      # only needed for Import-PolicyHistoryToDatabase.ps1
 ```
 
 If you don't have them yet:
 
 ```powershell
-Install-Module Microsoft.Graph.Authentication, ImportExcel -Scope CurrentUser
+Install-Module Microsoft.Graph.Authentication, ImportExcel, PSSQLite -Scope CurrentUser
 ```
 
 **Compatibility:** the scripts target **Windows PowerShell 5.1** (also run on
@@ -94,6 +96,7 @@ output/
            _Index.xlsx                    # master list of all policies
   state/   manifest.json                  # per-policy lastModified + contentHash
            definitions.json               # cached setting definitions (reused across runs)
+  db/      PolicyHistory.sqlite           # queryable version-history database (Phase 6)
 ```
 
 Every run creates a new `json/<timestamp>/` folder, so JSON snapshots build up
@@ -158,6 +161,39 @@ requests `DeviceManagementConfiguration.ReadWrite.All` (the other scripts
 only ever request `.Read.All`). It supports `-WhatIf` to print exactly what
 would be created (name, platform, settings count) without making the call.
 
+## Queryable history database (Phase 6)
+
+`Import-PolicyHistoryToDatabase.ps1` loads the JSON snapshots into a single
+SQLite file so the whole history is queryable across policies and versions in
+one place — the foundation for the internal web page coming next. It never
+connects to Graph; it only reads JSON already on disk.
+
+```powershell
+Import-Module PSSQLite
+.\scripts\Import-PolicyHistoryToDatabase.ps1 -JsonPath .\output\json
+.\scripts\Import-PolicyHistoryToDatabase.ps1 -JsonPath .\output\json -WhatIf
+```
+
+Point `-JsonPath` at the whole `json/` folder, a single run's timestamped
+subfolder, or one `.json` file (folders are searched recursively). The
+database (default `output\db\PolicyHistory.sqlite`) has this shape:
+
+| Table | One row per | Holds |
+|-------|-------------|-------|
+| `Policies` | policy (by `PolicyId`) | latest name/description/platform, first/last seen, version count |
+| `PolicyVersions` | **distinct** `(PolicyId, ContentHash)` state | point-in-time metadata, last-modified, retrieved window, raw settings JSON |
+| `PolicySettings` | flattened setting in a version | `Path`, friendly `Title`, `Value`, `RawValue` |
+| `PolicyAssignments` | assignment in a version | type, include/exclude, group + filter (id and name) |
+| `IngestRuns` | run of this script | source path, counts, timestamps |
+
+A version is keyed by the **same content hash** `Backup-IntunePolicies.ps1`
+uses (flattened settings + assignments, not display names), so ingestion is
+**idempotent and additive**: re-running over the whole `json/` tree skips
+states already stored and appends only genuinely new versions. It supports
+`-WhatIf` to report what it found without touching the database. Setting
+titles resolve from the cached `state\definitions.json` when it's found near
+`-JsonPath`, falling back to raw definition ids offline.
+
 ## Tests (run offline, no tenant needed)
 
 ```powershell
@@ -188,8 +224,12 @@ round-trip.
 5. **Phase 5** ✅ — restore / "create policy from template": re-POST a stored
    JSON snapshot to Graph as a brand new, unassigned policy (original
    assignments are printed for manual re-application).
-6. **Phase 6** — database + internal web page (the `_Index` row shape is the
-   intended schema).
+6. **Phase 6** — database + internal web page.
+   - **6a** ✅ — SQLite version-history database (`Import-PolicyHistoryToDatabase.ps1`):
+     idempotent, additive ingestion of the JSON snapshots into a normalized,
+     queryable schema.
+   - **6b** — internal web page: a self-contained static HTML view generated
+     from the database (next).
 
 Additional policy types (legacy device configurations, administrative
 templates, compliance, endpoint security intents) slot in via a `PolicyType`
