@@ -400,11 +400,12 @@ function Get-TokenSet {
     if ([string]::IsNullOrWhiteSpace($Text)) { return @() }
 
     $expanded = $Text -creplace '([a-z])([A-Z])', '$1 $2'
+    # Use -split (regex) rather than String.Split(@(...)): passing an untyped
+    # array to .Split binds the single-String overload, so the text is never
+    # tokenized. The character class covers whitespace and the previous
+    # delimiters (space, _ - / \ . : ( ) [ ]); the trailing '-' is literal.
     return @(
-        $expanded.ToLowerInvariant().Split(
-            @(' ','_','-','/','\','.',':','(',')','[',']'),
-            [StringSplitOptions]::RemoveEmptyEntries
-        ) |
+        ($expanded.ToLowerInvariant() -split '[\s_/\\.:()\[\]-]+') |
         Where-Object {
             $_.Length -gt 2 -and
             $_ -notin @('policy','setting','windows','microsoft','computer','user','configure')
@@ -529,12 +530,12 @@ function Get-VerifiedOverlapRows {
             GpoConfigured     = $matchingGpo.Count -gt 0
             MdmConfigured     = $matchingMdm.Count -gt 0
             GpoSetting        = $mapping.GpoSetting
-            GpoName           = ($matchingGpo.GpoName | Where-Object { $_ } | Sort-Object -Unique) -join '; '
-            GpoState          = ($matchingGpo.State | Where-Object { $_ } | Sort-Object -Unique) -join '; '
+            GpoName           = (@($matchingGpo | ForEach-Object { $_.GpoName }) | Where-Object { $_ } | Sort-Object -Unique) -join '; '
+            GpoState          = (@($matchingGpo | ForEach-Object { $_.State }) | Where-Object { $_ } | Sort-Object -Unique) -join '; '
             CspArea           = $mapping.CspArea
             CspPolicy         = $mapping.CspPolicy
-            MdmEffectiveValue = ($matchingMdm.EffectiveValue | Sort-Object -Unique) -join '; '
-            WinningProvider   = ($matchingMdm.WinningProvider | Where-Object { $_ } | Sort-Object -Unique) -join '; '
+            MdmEffectiveValue = (@($matchingMdm | ForEach-Object { $_.EffectiveValue }) | Where-Object { $_ } | Sort-Object -Unique) -join '; '
+            WinningProvider   = (@($matchingMdm | ForEach-Object { $_.WinningProvider }) | Where-Object { $_ } | Sort-Object -Unique) -join '; '
             OmaUri            = $mapping.OmaUri
             Status            = if ($matchingGpo.Count -gt 0 -and $matchingMdm.Count -gt 0) {
                                     'Confirmed overlap. Validate effective value and behavior.'
