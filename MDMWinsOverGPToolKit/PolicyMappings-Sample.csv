@@ -1,0 +1,2 @@
+﻿GpoSetting,GpoName,CspArea,CspPolicy,OmaUri,Notes
+Example GPO setting display name,,ExampleArea,ExamplePolicy,./Device/Vendor/MSFT/Policy/Config/ExampleArea/ExamplePolicy,Replace with a mapping verified against Microsoft documentation.
