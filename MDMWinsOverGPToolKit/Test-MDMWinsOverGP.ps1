@@ -579,6 +579,7 @@ function Get-HeuristicOverlapRows {
                 $score = 1.0
             }
             elseif ($gpoNormalized.Length -ge 6 -and
+                    $mdm.NormalizedName.Length -ge 6 -and
                     ($mdm.NormalizedName.Contains($gpoNormalized) -or
                      $gpoNormalized.Contains($mdm.NormalizedName))) {
                 $score = 0.8
@@ -613,8 +614,14 @@ function Get-HeuristicOverlapRows {
         }
     }
 
+    # Use hashtable sort keys so the mixed ascending/descending sort parses
+    # unambiguously. "Sort-Object Confidence -Descending, GpoSetting" does not
+    # bind the way it reads and can fail under Set-StrictMode.
     return $results.ToArray() |
-        Sort-Object Confidence -Descending, GpoSetting -Unique
+        Sort-Object -Property `
+            @{ Expression = 'Confidence'; Descending = $true }, `
+            @{ Expression = 'GpoSetting'; Descending = $false } `
+            -Unique
 }
 
 function ConvertTo-HtmlEncoded {
@@ -755,6 +762,12 @@ if (-not (Test-IsAdministrator)) {
     throw 'Run this script from an elevated Windows PowerShell or PowerShell session.'
 }
 
+# Validate optional input up front so a bad path fails fast, before we spend
+# time collecting evidence that would be discarded when the import later throws.
+if (-not [string]::IsNullOrWhiteSpace($MappingCsv) -and -not (Test-Path -LiteralPath $MappingCsv)) {
+    throw "Mapping CSV not found: $MappingCsv"
+}
+
 $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $outputFolder = Join-Path $OutputRoot "$env:COMPUTERNAME-$timestamp"
 $folders = @{
@@ -771,7 +784,14 @@ foreach ($folder in $folders.Values) {
 }
 
 $transcriptPath = Join-Path $folders.Root 'Transcript.txt'
-Start-Transcript -LiteralPath $transcriptPath -Force | Out-Null
+$transcriptStarted = $false
+try {
+    Start-Transcript -LiteralPath $transcriptPath -Force | Out-Null
+    $transcriptStarted = $true
+}
+catch {
+    Write-Warning "Could not start a transcript. Continuing without one. $($_.Exception.Message)"
+}
 
 $debugWasEnabled = $false
 $debugEnabledByThisRun = $false
@@ -925,13 +945,9 @@ try {
     $manifest | ConvertTo-Json -Depth 4 |
         Set-Content -LiteralPath (Join-Path $folders.Root 'Manifest.json') -Encoding UTF8
 
-    $zipPath = "$outputFolder.zip"
-    Compress-Archive -Path (Join-Path $outputFolder '*') -DestinationPath $zipPath -Force
-
     Write-Host ''
     Write-Host 'Collection completed.'
     Write-Host "HTML report: $reportPath"
-    Write-Host "Evidence ZIP: $zipPath"
 }
 finally {
     if ($DisableDebugLogAfterCollection -and $debugEnabledByThisRun) {
@@ -944,5 +960,22 @@ finally {
         }
     }
 
-    Stop-Transcript | Out-Null
+    if ($transcriptStarted) {
+        try { Stop-Transcript | Out-Null } catch { }
+    }
+
+    # Package whatever evidence was collected. This runs after the transcript is
+    # stopped so the transcript file is flushed and unlocked before it is zipped,
+    # and it runs even on failure so a partial collection is still preserved.
+    # A ZIP failure must not mask the underlying result, so it is non-fatal.
+    if (Test-Path -LiteralPath $outputFolder) {
+        $zipPath = "$outputFolder.zip"
+        try {
+            Compress-Archive -Path (Join-Path $outputFolder '*') -DestinationPath $zipPath -Force
+            Write-Host "Evidence ZIP: $zipPath"
+        }
+        catch {
+            Write-Warning "Could not create evidence ZIP. The evidence folder is still available at $outputFolder. $($_.Exception.Message)"
+        }
+    }
 }
