@@ -795,6 +795,8 @@ catch {
 
 $debugWasEnabled = $false
 $debugEnabledByThisRun = $false
+$collectionSucceeded = $false
+$collectionError = $null
 
 try {
     Write-Host "Collecting MDMWinsOverGP validation evidence from $env:COMPUTERNAME"
@@ -930,24 +932,37 @@ try {
         -EvidenceFolder $folders.Root
 
     $manifest = [ordered]@{
-        ComputerName       = $env:COMPUTERNAME
-        Generated          = (Get-Date).ToString('o')
-        WindowsVersion     = [Environment]::OSVersion.VersionString
-        PowerShellVersion  = $PSVersionTable.PSVersion.ToString()
-        SinceHours         = $SinceHours
-        MappingCsv         = $MappingCsv
-        DebugWasEnabled    = $debugWasEnabled
-        DebugEnabledByRun  = $debugEnabledByThisRun
-        OutputFolder       = $folders.Root
-        HtmlReport         = $reportPath
+        ComputerName        = $env:COMPUTERNAME
+        Generated           = (Get-Date).ToString('o')
+        WindowsVersion      = [Environment]::OSVersion.VersionString
+        PowerShellVersion   = $PSVersionTable.PSVersion.ToString()
+        SinceHours          = $SinceHours
+        MappingCsv          = $MappingCsv
+        DebugWasEnabled     = $debugWasEnabled
+        DebugEnabledByRun   = $debugEnabledByThisRun
+        OutputFolder        = $folders.Root
+        HtmlReport          = $reportPath
+        CollectionSucceeded = $true
+        CollectionError     = $null
     }
 
     $manifest | ConvertTo-Json -Depth 4 |
         Set-Content -LiteralPath (Join-Path $folders.Root 'Manifest.json') -Encoding UTF8
 
+    # Mark success only after every collection step and the report/manifest are
+    # written, so the ZIP naming below can distinguish a complete package from a
+    # partial one salvaged after a failure.
+    $collectionSucceeded = $true
+
     Write-Host ''
     Write-Host 'Collection completed.'
     Write-Host "HTML report: $reportPath"
+}
+catch {
+    # Preserve the failure for the manifest/marker below, then re-throw so the
+    # run still surfaces the error to the caller exactly as before.
+    $collectionError = $_
+    throw
 }
 finally {
     if ($DisableDebugLogAfterCollection -and $debugEnabledByThisRun) {
@@ -964,15 +979,38 @@ finally {
         try { Stop-Transcript | Out-Null } catch { }
     }
 
+    # When the run failed, drop a marker into the folder so the salvaged evidence
+    # is self-describing rather than relying on the file name alone.
+    if (-not $collectionSucceeded -and (Test-Path -LiteralPath $outputFolder)) {
+        $errorText = if ($collectionError) { $collectionError.Exception.Message } else { 'Collection did not complete.' }
+        try {
+            @(
+                'COLLECTION INCOMPLETE'
+                "Timestamp: $((Get-Date).ToString('o'))"
+                "Error: $errorText"
+                'This package was salvaged after a failure and may be missing evidence.'
+            ) | Set-Content -LiteralPath (Join-Path $outputFolder 'COLLECTION-INCOMPLETE.txt') -Encoding UTF8
+        }
+        catch { }
+    }
+
     # Package whatever evidence was collected. This runs after the transcript is
     # stopped so the transcript file is flushed and unlocked before it is zipped,
     # and it runs even on failure so a partial collection is still preserved.
-    # A ZIP failure must not mask the underlying result, so it is non-fatal.
+    # Partial packages get a distinct name so an incomplete collection is never
+    # mistaken for a successful one. A ZIP failure must not mask the underlying
+    # result, so it is non-fatal.
     if (Test-Path -LiteralPath $outputFolder) {
-        $zipPath = "$outputFolder.zip"
+        $zipSuffix = if ($collectionSucceeded) { '' } else { '-PARTIAL' }
+        $zipPath = "$outputFolder$zipSuffix.zip"
         try {
             Compress-Archive -Path (Join-Path $outputFolder '*') -DestinationPath $zipPath -Force
-            Write-Host "Evidence ZIP: $zipPath"
+            if ($collectionSucceeded) {
+                Write-Host "Evidence ZIP: $zipPath"
+            }
+            else {
+                Write-Warning "Collection did not complete. Partial evidence ZIP: $zipPath"
+            }
         }
         catch {
             Write-Warning "Could not create evidence ZIP. The evidence folder is still available at $outputFolder. $($_.Exception.Message)"
