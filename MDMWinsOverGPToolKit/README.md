@@ -70,5 +70,52 @@ You can disable the Debug log automatically after collection:
 
 Microsoft supports MDM diagnostic collection through `MdmDiagnosticsTool.exe`, and the DeviceManagement Enterprise Diagnostics Provider Admin and Debug channels are the main local Windows logs for MDM processing. ([Microsoft Learn][2])liberately does not treat Event 881 as proof of a conflict. It records those events as PolicyManager activity and uses them as supporting evidence only.
 
+MDMWinsOverGP Validation Script
+
+Files
+- Test-MDMWinsOverGP.ps1
+- PolicyMappings-Sample.csv
+
+Recommended first run
+
+Open Windows PowerShell 5.1 or PowerShell 7 as Administrator:
+
+Set-ExecutionPolicy -Scope Process Bypass
+.\Test-MDMWinsOverGP.ps1 -EnableDebugLog -RunGpUpdate -SinceHours 24
+
+For a cleaner test sequence:
+1. Enable the Debug channel.
+2. Trigger an Intune sync from Settings or Company Portal.
+3. Run gpupdate /force.
+4. Trigger another Intune sync.
+5. Run the script again without clearing the logs.
+
+Example with verified mappings:
+
+.\Test-MDMWinsOverGP.ps1 `
+  -EnableDebugLog `
+  -MappingCsv .\PolicyMappings-Sample.csv `
+  -SinceHours 48
+
+Main outputs
+- Reports\MDMWinsOverGP-Validation.html
+- Reports\Verified-Overlap-Results.csv
+- Reports\Heuristic-Overlap-Candidates.csv
+- Reports\MDM-EffectivePolicies.csv
+- Reports\GPO-Settings.csv
+- Reports\Event-881.csv
+- Events\*.evtx
+- GPResult\GPResult.html
+- GPResult\GPResult.xml
+- MDMDiagnostics\
+- A ZIP containing the full evidence package
+
+Interpretation
+- Verified mapping: Based on rows you supplied in the mapping CSV.
+- Heuristic candidate: Similar names only. It is not proof of a conflict.
+- WinningProvider: Reported only where PolicyManager exposes the related metadata.
+- Event 881: PolicyManager activity. It is not proof that MDM overrode GPO.
+
+
 [1]: https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-controlpolicyconflict?utm_source=chatgpt.com "Policy CSP - ControlPolicyConflict"
 [2]: https://learn.microsoft.com/en-us/windows/client-management/mdm-collect-logs?utm_source=chatgpt.com "Collect MDM logs"
