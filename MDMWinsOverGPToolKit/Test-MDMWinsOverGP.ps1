@@ -45,7 +45,12 @@
     Disables the Debug channel after collection, but only when this run enabled it.
 
 .PARAMETER RunGpUpdate
-    Runs gpupdate /force before collecting GPResult.
+    Runs gpupdate /force before collecting GPResult. This is best effort: if it
+    hangs or fails, the run logs the problem and continues.
+
+.PARAMETER GpUpdateTimeoutSeconds
+    Hard timeout for the gpupdate step. If gpupdate has not finished within this
+    many seconds it is terminated and collection continues. Default 180.
 
 .PARAMETER SkipMdmDiagnostics
     Skips MdmDiagnosticsTool.exe.
@@ -66,6 +71,8 @@ param(
     [switch]$EnableDebugLog,
     [switch]$DisableDebugLogAfterCollection,
     [switch]$RunGpUpdate,
+    [ValidateRange(30, 3600)]
+    [int]$GpUpdateTimeoutSeconds = 180,
     [switch]$SkipMdmDiagnostics
 )
 
@@ -198,9 +205,9 @@ function Set-DmDebugLogState {
     $logName = 'Microsoft-Windows-DeviceManagement-Enterprise-Diagnostics-Provider/Debug'
     $enabledText = if ($Enabled) { 'true' } else { 'false' }
 
-    & "$env:SystemRoot\System32\wevtutil.exe" sl $logName "/e:$enabledText" 2>&1 | Out-Null
+    $output = & "$env:SystemRoot\System32\wevtutil.exe" sl $logName "/e:$enabledText" 2>&1
     if ($LASTEXITCODE -ne 0) {
-        throw "wevtutil failed to set Debug log state to $Enabled."
+        throw "wevtutil failed to set Debug log state to $Enabled (exit $LASTEXITCODE): $(($output | ForEach-Object { [string]$_ }) -join ' ')"
     }
 }
 
@@ -291,6 +298,56 @@ function Invoke-GpResultCollection {
         XmlPath  = $xmlPath
         HtmlPath = $htmlPath
         TextPath = $textPath
+    }
+}
+
+function Invoke-GpUpdate {
+    param(
+        [Parameter(Mandatory)][string]$Folder,
+        [int]$TimeoutSeconds = 180
+    )
+
+    $gpupdate  = Join-Path $env:SystemRoot 'System32\gpupdate.exe'
+    $outFile   = Join-Path $Folder 'GPUpdate.txt'
+    $errFile   = Join-Path $Folder 'GPUpdate-error.txt'
+
+    # gpupdate can stall for two reasons: its own async wait (default /wait is
+    # 600 seconds) and an interactive "log off / restart now? (Y/N)" prompt it
+    # shows when a policy requests a foreground refresh. Bound the first with an
+    # explicit /wait, and defuse the second by redirecting stdin from a file of
+    # 'N' answers so it never blocks on the console. A hard process timeout then
+    # guarantees the run continues no matter what.
+    $stdinFile = Join-Path $Folder 'GPUpdate-input.tmp'
+    @('N','N','N') | Set-Content -LiteralPath $stdinFile -Encoding ascii
+
+    $waitSeconds = [math]::Max(0, $TimeoutSeconds - 30)
+
+    try {
+        $proc = Start-Process -FilePath $gpupdate `
+            -ArgumentList '/force', "/wait:$waitSeconds" `
+            -NoNewWindow -PassThru `
+            -RedirectStandardOutput $outFile `
+            -RedirectStandardError $errFile `
+            -RedirectStandardInput $stdinFile
+
+        if ($proc.WaitForExit($TimeoutSeconds * 1000)) {
+            Write-Host "gpupdate completed with exit code $($proc.ExitCode)."
+        }
+        else {
+            Write-Warning "gpupdate did not finish within $TimeoutSeconds seconds. Terminating it and continuing with collection."
+            # Process.Kill([bool]) for the whole tree is .NET Core only; on Windows
+            # PowerShell 5.1 use taskkill /T to terminate gpupdate and its children.
+            & "$env:SystemRoot\System32\taskkill.exe" /PID $proc.Id /T /F 2>&1 |
+                Out-File -LiteralPath $errFile -Append -Encoding utf8
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $stdinFile -Force -ErrorAction SilentlyContinue
+    }
+
+    # Echo gpupdate's captured output into the transcript for the record.
+    if (Test-Path -LiteralPath $outFile) {
+        Get-Content -LiteralPath $outFile | ForEach-Object { Write-Host $_ }
     }
 }
 
@@ -813,14 +870,28 @@ try {
 
     if ($EnableDebugLog -and -not $debugWasEnabled) {
         Write-Host 'Enabling DeviceManagement Debug log...'
-        Set-DmDebugLogState -Enabled $true
-        $debugEnabledByThisRun = $true
+        # Best effort: enabling the Debug channel can fail (access denied, the
+        # channel is already enabled elsewhere, policy). That must not abort the
+        # whole collection, so log the reason and carry on without it.
+        try {
+            Set-DmDebugLogState -Enabled $true
+            $debugEnabledByThisRun = $true
+        }
+        catch {
+            Write-Warning "Could not enable the DeviceManagement Debug log; continuing without it. $($_.Exception.Message)"
+        }
     }
 
     if ($RunGpUpdate) {
-        Write-Host 'Running gpupdate /force...'
-        & "$env:SystemRoot\System32\gpupdate.exe" /force 2>&1 |
-            Tee-Object -FilePath (Join-Path $folders.GPResult 'GPUpdate.txt')
+        Write-Host "Running gpupdate /force (timeout ${GpUpdateTimeoutSeconds}s)..."
+        # Best effort: gpupdate is a convenience refresh, not core evidence. If it
+        # hangs or fails it must never take the run down with it.
+        try {
+            Invoke-GpUpdate -Folder $folders.GPResult -TimeoutSeconds $GpUpdateTimeoutSeconds
+        }
+        catch {
+            Write-Warning "gpupdate step failed; continuing with collection. $($_.Exception.Message)"
+        }
     }
 
     Write-Host 'Collecting GPResult...'
