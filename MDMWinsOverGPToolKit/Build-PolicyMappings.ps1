@@ -762,7 +762,12 @@ if ($mappingRows.Count -eq 0) {
 # expects (GpoSetting,GpoName,CspArea,CspPolicy,OmaUri,Notes). Tier is
 # script-internal bookkeeping, not part of that schema, but its detail is
 # preserved in Notes for every row so nothing is lost from the CSV itself.
-$outputRows = $mappingRows | Select-Object GpoSetting, GpoName, CspArea, CspPolicy, OmaUri, Notes
+# The @() wrapper is load-bearing, not cosmetic: piping an empty $mappingRows
+# through Select-Object emits nothing, which leaves $outputRows as $null, and
+# the .Count access below would then throw PropertyNotFoundStrict under
+# Set-StrictMode -Version 2. An empty result is a legitimate outcome here (see
+# the warning above), so it must not crash the run.
+$outputRows = @($mappingRows | Select-Object GpoSetting, GpoName, CspArea, CspPolicy, OmaUri, Notes)
 
 $outputDir = Split-Path -Path $OutputPath -Parent
 if ($outputDir -and -not (Test-Path -LiteralPath $outputDir)) {
