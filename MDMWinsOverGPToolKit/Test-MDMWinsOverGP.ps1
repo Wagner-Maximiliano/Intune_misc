@@ -578,6 +578,14 @@ function Get-JaccardScore {
         [string[]]$Right
     )
 
+    # Under Set-StrictMode -Version 2, a $null bound to a [string[]] parameter
+    # (e.g. when Get-TokenSet's token set collapses to nothing) throws
+    # "The property 'Count' cannot be found on this object" instead of
+    # quietly treating it as empty. Force both to real arrays first so an
+    # empty token set is handled the same as a null one.
+    $Left = @($Left)
+    $Right = @($Right)
+
     if ($Left.Count -eq 0 -or $Right.Count -eq 0) { return 0 }
 
     $intersection = @($Left | Where-Object { $Right -contains $_ } | Sort-Object -Unique)
