@@ -468,6 +468,117 @@ supports distinguishing severities. Treat `3` as "re-run or investigate
 when convenient" - it means the run completed but couldn't fully answer the
 question this toolkit exists to answer.
 
+## Invoke-MDMWinsOverGPFleet.ps1 (running against a fleet from a management server)
+
+`Test-MDMWinsOverGP.ps1` is designed to run on one device at a time -
+locally, via Intune Win32 app, SCCM, or an RMM push. `Invoke-MDMWinsOverGPFleet.ps1`
+is a separate, standalone script for the different scenario of a management
+server with network line-of-sight (and admin rights) to many domain-joined
+devices at once, where you want to trigger runs remotely rather than
+deploying anything to each device individually.
+
+It does not collect or analyze anything itself. It only:
+
+1. Reads a device list from a CSV (`-DeviceListCsv`, one `DeviceName` column
+   per row).
+2. Confirms each device is online with `Test-Connection` before touching it.
+3. Uses `Invoke-Command` to launch the existing, unmodified
+   `Test-MDMWinsOverGP.ps1` - already deployed to a network share - as a
+   child `powershell.exe` process on every online device (throttled,
+   `-ThrottleLimit`, default 10 concurrent).
+4. Writes one `FleetSummary.csv` covering every device: online or not, the
+   remote script's own exit code (see "Exit codes" above), and a plain-English
+   `Outcome` (`Success`, `ConflictsFound`, `DegradedEvidence`,
+   `RemoteScriptFailed`, `Offline`, `ConnectionFailed`, `TimedOut`).
+
+Each device still collects and centrally uploads its own evidence ZIP
+exactly the way a single-device run does - pass `-ResultsShare` through to
+the fleet script and it is forwarded to `Test-MDMWinsOverGP.ps1` on every
+device unchanged:
+
+```powershell
+.\Invoke-MDMWinsOverGPFleet.ps1 `
+    -DeviceListCsv .\Devices.csv `
+    -Credential (Get-Credential) `
+    -ResultsShare '\\msfssoftware\Client\MDMWinOverGPO\Results' `
+    -RemoteScriptArguments @('-GenerateMappings')
+```
+
+`Devices.csv`:
+
+```csv
+DeviceName
+CONTOSO-PC01
+CONTOSO-PC02
+CONTOSO-LAPTOP-047
+```
+
+By default, `-RemoteScriptPath` points at
+`\\msfssoftware\Client\MDMWinOverGPO\Script\Test-MDMWinsOverGP.ps1` - this is
+a path evaluated **from each remote device**, not the management server, so
+it needs to be somewhere every target device can already read (a UNC share
+domain devices have read access to is the normal choice; override with
+`-RemoteScriptPath` if yours lives elsewhere).
+
+### Credentials and the "double-hop" problem
+
+`Invoke-Command` authenticates to each device using `-Credential` (prompted
+interactively if not supplied). This script does nothing further to
+delegate that credential past the device it's connecting to - no CredSSP,
+no constrained delegation. That matters specifically for `-ResultsShare`:
+once `Test-MDMWinsOverGP.ps1` is running *on* the remote device, its attempt
+to write the evidence ZIP to a **third** machine (the results share) is a
+second network hop, and by default Windows will not forward the credential
+Invoke-Command used to get there - this is the well-known PowerShell
+"double-hop" limitation, not a bug in either script.
+
+In practice this is a non-issue when the account running the fleet script
+is a domain admin (or similarly privileged) account that both (a) has admin
+rights on every target device and (b) is also the account gpresult/registry
+collection runs under on the device itself - since collection itself
+(reading local HKLM policy state, running `gpresult.exe`) only needs rights
+*on* the device, not a further hop, only the `-ResultsShare` copy is
+double-hop-sensitive at all. If ZIPs stop showing up on the results share
+only when runs are launched through this script (while the same device
+still writes there fine when run locally), that's the double-hop symptom -
+options, roughly in order of effort:
+
+- **Grant the device's own computer account (`DOMAIN\CONTOSO-PC01$`) write
+  access to the results share.** No delegation needed at all in this case:
+  the remote `Test-MDMWinsOverGP.ps1` process still runs as your admin
+  credential, but you can additionally grant `Domain Computers` (or a
+  dedicated group) write access to the share so the copy succeeds
+  regardless of which identity ends up making it - the simplest fix if your
+  environment allows loosening the share ACL this way.
+- **CredSSP.** Enable CredSSP delegation on the management server
+  (`Enable-WSManCredSSP -Role Client -DelegateComputer *.contoso.com`) and
+  on every target device (`Enable-WSManCredSSP -Role Server`), then add
+  `-Authentication Credssp` to the `Invoke-Command` call in this script.
+  Works reliably but sends the credential to the remote host and widens
+  what that host could do with it - treat as a deliberate, scoped tradeoff,
+  not a default.
+- **Resource-based constrained delegation (Kerberos).** The most
+  "correct" fix for an AD environment that already manages delegation this
+  way, but requires AD schema-level configuration per target device/service
+  and is out of scope for this toolkit to configure for you.
+
+### Other parameters
+
+| Parameter | Default | Purpose |
+|---|---|---|
+| `-RemoteScriptArguments` | (none) | Extra arguments forwarded as-is to `Test-MDMWinsOverGP.ps1` on every device (e.g. `@('-GenerateMappings','-SinceHours','48')`). Do not pass `-ResultsShare` here - use the dedicated parameter so it's applied consistently and shows up in the summary. |
+| `-ThrottleLimit` | 10 | Max devices processed concurrently by `Invoke-Command`. |
+| `-PingCount` | 2 | `Test-Connection` echo requests per device before attempting `Invoke-Command`. |
+| `-RemoteTimeoutSeconds` | 1800 | How long this script waits for the whole fleet run before giving up and marking still-running devices `TimedOut` (the remote runs themselves are not killed - only this script stops waiting). |
+| `-SummaryOutputPath` | `<script folder>\Data\FleetRuns\<timestamp>\FleetSummary.csv` (or a ProgramData fallback - same portability rule as `Test-MDMWinsOverGP.ps1`) | Where the per-device summary CSV is written. |
+| `-DataRoot` | (none) | Pins the fleet-run output location explicitly, same convention as `Test-MDMWinsOverGP.ps1`'s `-DataRoot`. |
+
+This script's own exit code summarizes the whole fleet run: `1` if any
+device failed to run or connect (`RemoteScriptFailed`, `ConnectionFailed`,
+`TimedOut`), else `2` if any device reported conflicts or degraded evidence,
+else `0`. Always check `FleetSummary.csv` for the per-device breakdown -
+the script's own exit code is only a fleet-wide rollup.
+
 ## Build-PolicyMappings.ps1 (auto-generating the mapping CSV)
 
 ### Why this exists
