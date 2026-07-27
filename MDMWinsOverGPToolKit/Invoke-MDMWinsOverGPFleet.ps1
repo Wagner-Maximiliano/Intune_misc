@@ -537,7 +537,23 @@ if ($sessions.Count -gt 0) {
                 # Local temp folder on the device. Everything the run needs -
                 # the scripts, the evidence, the ZIP - lives here, so the
                 # device performs no network I/O at all.
-                $work = Join-Path $env:TEMP ('MDMWinsOverGP-' + [guid]::NewGuid().ToString('N'))
+                #
+                # Kept as short as possible: gpresult.exe itself rejects an
+                # /x or /h output path longer than 127 characters, and
+                # Test-MDMWinsOverGP.ps1 nests GPResult.xml four levels below
+                # -OutputRoot ("...\<Computer>-<timestamp>\GPResult\GPResult.xml").
+                # $env:windir\Temp is used instead of $env:TEMP (the user
+                # profile temp folder) because its length is fixed
+                # ("C:\Windows\Temp"), whereas $env:TEMP varies with the
+                # logon account's username and can push the total over the
+                # limit on its own; a 6-character id and no extra "Evidence"
+                # subfolder keep the rest of the path minimal too. Falls back
+                # to $env:TEMP if C:\Windows\Temp is not writable for some
+                # reason (e.g. a locked-down device policy).
+                $shortId = ([guid]::NewGuid().ToString('N')).Substring(0, 6)
+                $tempBase = Join-Path $env:windir 'Temp'
+                if (-not (Test-Path -LiteralPath $tempBase)) { $tempBase = $env:TEMP }
+                $work = Join-Path $tempBase "MW-$shortId"
                 New-Item -ItemType Directory -Path $work -Force -ErrorAction Stop | Out-Null
                 $result.WorkFolder = $work
 
@@ -546,7 +562,13 @@ if ($sessions.Count -gt 0) {
                 }
 
                 $targetScript = Join-Path $work 'Test-MDMWinsOverGP.ps1'
-                $evidenceRoot = Join-Path $work 'Evidence'
+                # -OutputRoot points directly at $work (no extra "Evidence"
+                # subfolder) to keep the resulting GPResult.xml path short -
+                # see the path-length comment above $work's assignment. The
+                # evidence subfolder Test-MDMWinsOverGP.ps1 creates under it
+                # is named "<ComputerName>-<timestamp>", so it cannot collide
+                # with the script files also sitting directly in $work.
+                $evidenceRoot = $work
                 $stdoutPath = Join-Path $work 'remote-stdout.txt'
 
                 # -OutputRoot pins where the evidence folder and its sibling

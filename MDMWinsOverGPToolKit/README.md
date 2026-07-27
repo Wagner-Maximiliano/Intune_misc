@@ -582,6 +582,13 @@ failed run on the device itself.
 | `-PingCount` | 2 | `Test-Connection` echoes per device before a session is attempted. |
 | `-RemoteTimeoutSeconds` | 1800 | How long to wait for the fleet before marking still-running devices `TimedOut`. Remote runs are not killed - this script just stops waiting. |
 | `-KeepRemoteTempFolder` | off | `Copy` mode only. Leaves the per-device temp folder (scripts, evidence, remote stdout log) on the device for inspection. |
+
+In `Copy` mode, the per-device temp folder is deliberately created as
+`%windir%\Temp\MW-<6-char-id>` rather than under the user's own `%TEMP%` -
+`gpresult.exe` itself rejects an output path longer than 127 characters, and
+`Test-MDMWinsOverGP.ps1` nests `GPResult.xml` four levels below
+`-OutputRoot`; `%windir%\Temp` has a fixed, short length regardless of the
+logon account's username, where `%TEMP%` does not.
 | `-SummaryOutputPath` | `<script folder>\Data\FleetRuns\<timestamp>\FleetSummary.csv` (or a ProgramData fallback - same portability rule as `Test-MDMWinsOverGP.ps1`) | Where the per-device summary CSV is written. |
 | `-DataRoot` | (none) | Pins the fleet-run output location explicitly, same convention as `Test-MDMWinsOverGP.ps1`'s `-DataRoot`. |
 
