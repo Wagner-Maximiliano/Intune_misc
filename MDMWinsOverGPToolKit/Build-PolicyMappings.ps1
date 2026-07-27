@@ -21,42 +21,64 @@
       Phase 2 - CSP catalog:
         Enumerates HKLM:\SOFTWARE\Microsoft\PolicyManager\default\<Area>\<Policy>,
         which lists every Policy CSP setting the running OS build knows
-        about.
+        about. NOTE: this "default" registry tree only ever stores each
+        CSP policy's out-of-box default value - it carries no GPO-equivalence
+        metadata of any kind. It is used below purely as a name catalog
+        (Tier B), never as registry-match evidence.
 
-      Phase 3 - Join, with confidence tiers:
-        For every ADMX policy, BOTH matching strategies below are attempted
-        independently (this is not a short-circuiting waterfall), and the
-        results are then reconciled:
+      Phase 3 - Device corroboration evidence (live registry, always
+        attempted unless -SkipDeviceCorroboration is passed):
+        Reads two live registry sources directly from the device this
+        script is running on - no CSV import, no internet:
+          - Classic GPO registry evidence: every value actually present
+            under HKLM:\SOFTWARE\Policies and
+            HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies.
+          - Live MDM PolicyManager evidence: every value actually present
+            under HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device,
+            paired with its companion "<Value>_WinningProvider" value
+            where present.
+        Both reads are non-fatal: an unreadable/missing key is logged as a
+        WARN and treated as an empty evidence set rather than aborting the
+        run.
 
-          Registry-based match: the ADMX policy's registry valueName
-          attribute is looked up against the value names actually captured
-          under each CSP policy's HKLM:\...\PolicyManager\default\<Area>\<Policy>
-          key in Phase 2. A match is accepted only when it is unambiguous
-          (exactly one CSP policy exposes that value name); ambiguous or
-          absent evidence yields no registry-based match for that policy.
+      Phase 4 - Join, with confidence tiers:
+        For every ADMX policy, a name-based match is attempted against the
+        CSP catalog: exact, case-insensitive match between the ADMX
+        <policy name="..."> attribute and the CSP policy name.
+        ADMX-backed CSP policies frequently share this internal name
+        verbatim, so this is a strong signal on its own -> Tier B.
 
-          Name-based match: exact, case-insensitive match between the ADMX
-          <policy name="..."> attribute and the CSP policy name.
-          ADMX-backed CSP policies frequently share this internal name
-          verbatim, so this is a strong signal on its own.
+        Every Tier B match is then checked against the live device
+        corroboration evidence from Phase 3:
+          - GpoConfigured: is the ADMX policy's OWN declared key/valueName
+            (from Phase 1) present, with an actual value, in the classic
+            GPO registry evidence?
+          - MdmConfigured: is the matched CSP policy's Area/Policy present,
+            with an actual value, in the live MDM PolicyManager evidence?
+        If BOTH are true, this is live, on-device proof that the two
+        settings are the same enforced thing right now, and the row is
+        promoted to Tier A (device-corroborated) - the strongest possible
+        result this script can produce, because it is not just a name
+        match, it is two independent pieces of evidence that are both
+        currently true on this machine. This can only corroborate the
+        subset of ADMX policies that are actually GPO-configured on THIS
+        device right now; most Tier B rows will simply stay Tier B, which
+        is expected, not a failure.
 
-        Reconciliation (registry evidence always wins on conflict):
-          - Both methods agree on the same Area/Policy -> Tier A,
-            "corroborated" (the strongest possible result - both an
-            independent registry-value signal and an exact name match
-            point at the same CSP policy).
-          - Both methods match, but disagree on Area/Policy -> Tier A,
-            using the registry-based result as authoritative. The
-            rejected name-based candidate is NOT discarded silently; it
-            is recorded in Notes as a conflict for a human to adjudicate,
-            and counted separately in the coverage summary.
-          - Only the registry-based method matches -> Tier A ("registry-only").
-          - Only the name-based method matches -> Tier B ("name-only").
-          - Neither matches -> fall back to Tier C (weakest): normalized/
-            fuzzy token-similarity between the resolved GPO display name
-            and the CSP policy name. Review-only; never treat as verified.
+        If neither strategy matches at all, fall back to Tier C (weakest):
+        normalized/fuzzy token-similarity between the resolved GPO display
+        name and the CSP policy name. Review-only; never treat as verified.
 
-      Phase 4 - Output:
+        (Earlier revisions of this script also attempted a registry-based
+        match by comparing an ADMX valueName against value names captured
+        under PolicyManager\default in Phase 2. That path was removed: the
+        "default" hive only ever holds out-of-box default values, so that
+        comparison was structurally incapable of ever matching anything -
+        confirmed with 0 matches out of 3,549 ADMX policies on a real
+        device. Phase 3/4's live PolicyManager\current\device-based
+        corroboration replaces it with a signal that is actually meaningful.)
+
+      Phase 5 - Output:
         Writes a CSV with exactly the columns Test-MDMWinsOverGP.ps1 expects
         (GpoSetting,GpoName,CspArea,CspPolicy,OmaUri,Notes) plus a coverage
         summary. Optionally filters the output down to only the GPO settings
@@ -119,6 +141,18 @@
     the script on a handful of files before running it against the full
     PolicyDefinitions store, which can contain several hundred ADMX files.
 
+.PARAMETER SkipDeviceCorroboration
+    By default (this switch off), every Tier B name match is additionally
+    checked against live registry evidence read directly from this device
+    (classic GPO registry values under HKLM:\SOFTWARE\Policies and
+    HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies, and live MDM
+    PolicyManager evidence under HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device),
+    and promoted to Tier A when both sides are actually configured. Pass
+    this switch to skip that phase entirely - e.g. for a pure offline
+    catalog run, or if reading those registry trees hits a permissions
+    problem. When skipped, every match stays at Tier B or falls back to
+    Tier C; no rows are ever promoted to Tier A.
+
 .EXAMPLE
     .\Build-PolicyMappings.ps1
 
@@ -145,7 +179,9 @@ param(
     [string]$MinimumConfidence = 'B',
 
     [ValidateRange(1, 100000)]
-    [int]$SampleSize
+    [int]$SampleSize,
+
+    [switch]$SkipDeviceCorroboration
 )
 
 Set-StrictMode -Version 2.0
@@ -427,12 +463,17 @@ function Get-AdmxCatalog {
 
 # Enumerates HKLM:\SOFTWARE\Microsoft\PolicyManager\default\<Area>\<Policy>,
 # which lists every Policy CSP setting the running OS build/edition knows
-# about (independent of whether it is currently configured). Returns an
-# empty array - and logs a warning, not an error - when the key is missing
-# or unreadable, so the script still produces a (Tier-A/B-empty) GPO-only
-# catalog rather than aborting; a missing PolicyManager\default key most
-# often means this is being run on a non-Windows-10/11 or heavily locked
-# down system, not a script bug.
+# about (independent of whether it is currently configured). This is a
+# NAME catalog only - each policy's key under "default" holds nothing but
+# that policy's out-of-box default value, with no GPO-equivalence metadata
+# of any kind, so it is used purely for Tier B's exact-name matching, never
+# as registry-match evidence (an earlier revision of this script tried the
+# latter and it was structurally incapable of ever matching - see the
+# header comment). Returns an empty array - and logs a warning, not an
+# error - when the key is missing or unreadable, so the script still
+# produces a (Tier-B-empty) GPO-only catalog rather than aborting; a
+# missing PolicyManager\default key most often means this is being run on
+# a non-Windows-10/11 or heavily locked down system, not a script bug.
 function Get-CspCatalog {
     $basePath = 'HKLM:\SOFTWARE\Microsoft\PolicyManager\default'
     $rows = New-Object System.Collections.Generic.List[object]
@@ -464,23 +505,10 @@ function Get-CspCatalog {
         foreach ($policyKey in $policyKeys) {
             $policy = $policyKey.PSChildName
 
-            # Capture whatever value data is present under this policy's key
-            # (e.g. a default value) as extra join evidence for Tier A, but
-            # tolerate it being absent - the Area/Policy name pair alone is
-            # enough to build the catalog entry and OMA-URI.
-            $regValueNames = @()
-            try {
-                $regValueNames = @($policyKey.GetValueNames())
-            }
-            catch {
-                Write-Verbose "Could not read value names under '$($policyKey.PSPath)': $($_.Exception.Message)"
-            }
-
             $rows.Add([pscustomobject]@{
                 Area           = $area
                 Policy         = $policy
                 RegistryPath   = $policyKey.Name
-                ValueNames     = $regValueNames
                 NormalizedName = Normalize-PolicyName $policy
                 Tokens         = Get-TokenSet $policy
             })
@@ -501,22 +529,297 @@ function New-OmaUri {
     return "./$Scope/Vendor/MSFT/Policy/Config/$Area/$Policy"
 }
 
-# Phase 3: joins the ADMX catalog to the CSP catalog and produces mapping
+# Same value-stringification helper as Convert-ValueToText in
+# Test-MDMWinsOverGP.ps1 (kept local for the same standalone-script reason
+# as Normalize-PolicyName).
+function Convert-ValueToText {
+    param($Value)
+
+    if ($null -eq $Value) { return '' }
+
+    if ($Value -is [byte[]]) {
+        return [BitConverter]::ToString($Value)
+    }
+
+    if ($Value -is [array]) {
+        return ($Value | ForEach-Object { [string]$_ }) -join '; '
+    }
+
+    return [string]$Value
+}
+
+# Same recursive registry-value-flattening approach as Get-RegistryTreeValues
+# in Test-MDMWinsOverGP.ps1 (kept local rather than dot-sourcing, for the
+# same standalone-script reason as Normalize-PolicyName). Walks every value
+# under -Path - the key itself plus every descendant key - and flattens it
+# into one row per value. A per-key try/catch means one unreadable subkey
+# degrades this to "missing that one key's values", not "abort the whole
+# walk". Returns an empty array (never throws) when -Path itself does not
+# exist or cannot be enumerated at all - "this registry tree is not present/
+# readable on this device" is an expected, common outcome (e.g. no GPOs
+# applied, or the script not running elevated), not a bug.
+function Get-RegistryTreeValues {
+    param(
+        [Parameter(Mandatory)][string]$Path
+    )
+
+    $results = New-Object System.Collections.Generic.List[object]
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return @()
+    }
+
+    $keys = @()
+    try {
+        $keys += Get-Item -LiteralPath $Path -ErrorAction Stop
+        $keys += Get-ChildItem -LiteralPath $Path -Recurse -ErrorAction SilentlyContinue
+    }
+    catch {
+        Write-Log -Level WARN -Message "Could not enumerate registry path '$Path'. $($_.Exception.Message)"
+        return @()
+    }
+
+    foreach ($key in $keys) {
+        try {
+            $valueNames = $key.GetValueNames()
+
+            foreach ($valueName in $valueNames) {
+                $displayName = if ([string]::IsNullOrWhiteSpace($valueName)) { '(Default)' } else { $valueName }
+
+                $relativePath = $key.Name
+                $leaf = Split-Path -Path $relativePath -Leaf
+                $parent = Split-Path -Path $relativePath -Parent
+                $area = Split-Path -Path $parent -Leaf
+
+                $results.Add([pscustomobject]@{
+                    RegistryPath = $relativePath
+                    Area         = $area
+                    Policy       = $leaf
+                    ValueName    = $displayName
+                    Value        = Convert-ValueToText -Value $key.GetValue($valueName)
+                })
+            }
+        }
+        catch {
+            Write-Verbose "Could not read $($key.PSPath): $($_.Exception.Message)"
+        }
+    }
+
+    return $results.ToArray()
+}
+
+# Device corroboration, evidence source 1 of 2: reads every value actually
+# present under the two classic-GPO registry roots, live, on the device
+# this script is running on. This mirrors what Test-MDMWinsOverGP.ps1 reads
+# as Source=GPORegistry. Unlike the removed PolicyManager\default-based
+# match, this is real, current, on-device evidence, not a structurally-
+# empty default-value catalog. Non-fatal: an unreadable root degrades to an
+# empty evidence set for that root (Get-RegistryTreeValues already never
+# throws, but this wraps it anyway as belt-and-suspenders, consistent with
+# this script's style elsewhere) rather than aborting the whole run.
+function Get-ClassicGpoRegistryEvidence {
+    $roots = @(
+        'HKLM:\SOFTWARE\Policies',
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies'
+    )
+
+    $rows = New-Object System.Collections.Generic.List[object]
+
+    foreach ($root in $roots) {
+        try {
+            $treeRows = @(Get-RegistryTreeValues -Path $root)
+            foreach ($row in $treeRows) { $rows.Add($row) }
+        }
+        catch {
+            Write-Log -Level WARN -Message "Could not read classic GPO registry evidence under '$root'. Continuing with no corroboration evidence from this root. $($_.Exception.Message)"
+        }
+    }
+
+    return $rows.ToArray()
+}
+
+# Device corroboration, evidence source 2 of 2: reads every value actually
+# present, live, under HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device
+# (device scope only - unlike Test-MDMWinsOverGP.ps1 this script does not
+# also walk per-user HKEY_USERS\...\PolicyManager\current\user hives, since
+# every mapping row this script produces is Machine/Both-class, i.e.
+# device-scoped, unless -IncludeUserScope is set, and even then this pass
+# only ever checks the Device-side evidence - see the Scope guard in
+# Get-DeviceCorroboration). Pairs each base value with its companion
+# "<ValueName>_WinningProvider" value where present, same pairing logic as
+# Get-MdmPolicyRows in Test-MDMWinsOverGP.ps1. This tells us which CSP
+# policies are ACTUALLY effective on this device right now, and (via
+# WinningProvider) who currently wins that policy. Non-fatal: returns an
+# empty array and logs a WARN if the key is missing/unreadable.
+function Get-LiveMdmEvidence {
+    $path = 'HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device'
+
+    # Same "ignore these, they are not real policy values" list as
+    # Get-MdmPolicyRows in Test-MDMWinsOverGP.ps1.
+    $ignoredNames = @(
+        '(Default)',
+        'Behavior',
+        'PolicyInstanceID',
+        'PolicyInstanceID_ProviderSet',
+        'PolicyInstanceID_WinningProvider'
+    )
+
+    $treeRows = @()
+    try {
+        $treeRows = @(Get-RegistryTreeValues -Path $path)
+    }
+    catch {
+        Write-Log -Level WARN -Message "Could not read live MDM PolicyManager evidence under '$path'. Continuing with no MDM-side corroboration evidence. $($_.Exception.Message)"
+        return @()
+    }
+
+    if (-not $treeRows -or $treeRows.Count -eq 0) {
+        return @()
+    }
+
+    $results = New-Object System.Collections.Generic.List[object]
+
+    $baseRows = @(
+        $treeRows | Where-Object {
+            $_.ValueName -notin $ignoredNames -and
+            $_.ValueName -notmatch '(_ProviderSet|_WinningProvider)$'
+        }
+    )
+
+    foreach ($base in $baseRows) {
+        $winningProvider = $treeRows | Where-Object {
+            $_.RegistryPath -eq $base.RegistryPath -and
+            $_.ValueName -eq "$($base.ValueName)_WinningProvider"
+        } | Select-Object -First 1
+
+        $results.Add([pscustomobject]@{
+            Area            = $base.Area
+            Policy          = $base.Policy
+            ValueName       = $base.ValueName
+            Value           = $base.Value
+            RegistryPath    = $base.RegistryPath
+            WinningProvider = if ($winningProvider) { $winningProvider.Value } else { '' }
+        })
+    }
+
+    return $results.ToArray()
+}
+
+# For a single ADMX policy that already received a Tier B (name-only) match
+# against $Csp, checks the two live-registry evidence sets gathered above
+# for two independent signals:
+#
+#   GpoConfigured - is the ADMX policy's OWN declared registry key/valueName
+#   (captured in Phase 1, not reparsed here) present WITH AN ACTUAL VALUE in
+#   the classic GPO registry evidence? ADMX 'key' is a path relative to the
+#   hive implied by the policy's 'class' attribute; this pass only handles
+#   Machine/Both-class policies (Device scope), which imply HKLM:\ - it is
+#   never called for User-scope rows (see the $Scope guard below).
+#
+#   MdmConfigured - does the matched CSP policy's Area/Policy appear WITH AN
+#   ACTUAL VALUE in the live MDM PolicyManager evidence? The companion
+#   _WinningProvider value is captured when present.
+#
+# Known, accepted simplification: ADMX <policy> elements can declare
+# per-element registry keys/valueNames on child <elements> nodes instead of
+# (or in addition to) the policy-level key/valueName attributes captured in
+# Phase 1. This pass only checks the already-captured policy-level
+# key/valueName - it does NOT walk into <elements> to resolve per-element
+# registry locations for multi-value policies. A multi-value policy whose
+# actually-configured value lives only under a per-element key will
+# therefore not be detected as GpoConfigured even though it is genuinely
+# configured. This is a known, deliberate gap (resolving it would need a
+# much larger ADMX <elements> parser), not a bug - the policy-level
+# key/valueName pair still correctly corroborates the common single-value
+# policy case.
+#
+# This can only corroborate the subset of ADMX policies that are CURRENTLY
+# actually configured via classic GPO on THIS device - most rows will not
+# have GpoConfigured = $true, and that is expected, not evidence the name
+# match itself is wrong.
+function Get-DeviceCorroboration {
+    param(
+        [Parameter(Mandatory)][object]$Admx,
+        [Parameter(Mandatory)][object]$Csp,
+        [Parameter(Mandatory)][string]$Scope,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$GpoRegistryEvidence,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$MdmEvidence
+    )
+
+    $result = [ordered]@{
+        GpoConfigured    = $false
+        GpoEvidencePath  = ''
+        GpoEvidenceValue = ''
+        MdmConfigured    = $false
+        MdmEvidencePath  = ''
+        MdmEvidenceValue = ''
+        WinningProvider  = ''
+    }
+
+    # --- GPO side ---------------------------------------------------------
+    # Only meaningful for Device-scope (Machine/Both-class) rows: the classic
+    # GPO registry evidence gathered above is HKLM-only, so a User-scope
+    # ADMX policy's key (which would actually live under HKCU:\ when applied)
+    # cannot be corroborated by this evidence set.
+    if ($Scope -eq 'Device' -and
+        -not [string]::IsNullOrWhiteSpace($Admx.RegistryKey) -and
+        -not [string]::IsNullOrWhiteSpace($Admx.RegistryValue) -and
+        $GpoRegistryEvidence -and $GpoRegistryEvidence.Count -gt 0) {
+
+        $expectedPath = "HKEY_LOCAL_MACHINE\$($Admx.RegistryKey)"
+
+        $gpoHit = $GpoRegistryEvidence | Where-Object {
+            $_.RegistryPath -eq $expectedPath -and
+            $_.ValueName -eq $Admx.RegistryValue -and
+            -not [string]::IsNullOrWhiteSpace($_.Value)
+        } | Select-Object -First 1
+
+        if ($gpoHit) {
+            $result.GpoConfigured = $true
+            $result.GpoEvidencePath = "$($gpoHit.RegistryPath)\$($gpoHit.ValueName)"
+            $result.GpoEvidenceValue = $gpoHit.Value
+        }
+    }
+
+    # --- MDM side -----------------------------------------------------------
+    if ($MdmEvidence -and $MdmEvidence.Count -gt 0) {
+        $mdmHit = $MdmEvidence | Where-Object {
+            $_.Area -eq $Csp.Area -and
+            $_.Policy -eq $Csp.Policy -and
+            -not [string]::IsNullOrWhiteSpace($_.Value)
+        } | Select-Object -First 1
+
+        if ($mdmHit) {
+            $result.MdmConfigured = $true
+            $result.MdmEvidencePath = "$($mdmHit.RegistryPath)\$($mdmHit.ValueName)"
+            $result.MdmEvidenceValue = $mdmHit.Value
+            $result.WinningProvider = $mdmHit.WinningProvider
+        }
+    }
+
+    return [pscustomobject]$result
+}
+
+# Phase 4: joins the ADMX catalog to the CSP catalog and produces mapping
 # rows tagged with the confidence tier and match category that produced
 # them. Only a single row is kept per ADMX policy.
 #
-# Registry-based matching and name-based matching are run INDEPENDENTLY for
-# every ADMX policy (this is not a short-circuiting waterfall) and then
-# reconciled, per the join-logic clarification: registry evidence is more
-# reliable than name similarity, so it always wins on conflict, but a name
-# match is never silently thrown away - a rejected candidate is recorded in
-# Notes and counted separately so a human can see the disagreement.
+# Name-based matching (Tier B) is attempted for every ADMX policy. Every
+# Tier B match is then checked against the live device corroboration
+# evidence (-GpoRegistryEvidence / -MdmEvidence, gathered once up front by
+# the caller and passed in here so this stays a pure join function) via
+# Get-DeviceCorroboration; a match with BOTH GpoConfigured and MdmConfigured
+# true is promoted to Tier A. Only when no name match exists at all does
+# this fall back to Tier C fuzzy matching.
 function Get-MappingRows {
     param(
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$AdmxCatalog,
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$CspCatalog,
         [switch]$IncludeUserScope,
-        [ValidateSet('A', 'B', 'C')][string]$MinimumConfidence = 'B'
+        [ValidateSet('A', 'B', 'C')][string]$MinimumConfidence = 'B',
+        [switch]$SkipDeviceCorroboration,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$GpoRegistryEvidence,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$MdmEvidence
     )
 
     $tierRank = @{ A = 3; B = 2; C = 1 }
@@ -556,33 +859,7 @@ function Get-MappingRows {
             continue
         }
 
-        # --- Registry-based match --------------------------------------------
-        # The PolicyManager\default registry tree does not expose an explicit,
-        # documented "this CSP policy is backed by this GP registry key" link,
-        # so there is no way to compare $admx.RegistryKey directly. The one
-        # real, locally-observable signal available is weaker but genuine:
-        # whether the ADMX policy's registry valueName (e.g. "Enabled",
-        # "MaxSize") also appears as a value name captured under a CSP
-        # policy's own PolicyManager\default\<Area>\<Policy> key in Phase 2.
-        # This is accepted as a match only when it is UNAMBIGUOUS - i.e.
-        # exactly one CSP policy in the whole catalog exposes that value
-        # name - because common value names (e.g. "Enabled") appear under
-        # many unrelated CSP policies and would otherwise produce false
-        # positives. Ambiguous or absent evidence yields no registry match,
-        # which is an expected, common outcome, not a bug.
-        $registryMatch = $null
-        if (-not [string]::IsNullOrWhiteSpace($admx.RegistryValue)) {
-            $candidates = @(
-                $CspCatalog | Where-Object {
-                    $_.ValueNames -and ($_.ValueNames -contains $admx.RegistryValue)
-                }
-            )
-            if ($candidates.Count -eq 1) {
-                $registryMatch = $candidates[0]
-            }
-        }
-
-        # --- Name-based match -------------------------------------------------
+        # --- Name-based match (Tier B) -----------------------------------------
         # Exact, case-insensitive match between the ADMX <policy name="...">
         # attribute and the CSP policy name (PowerShell -eq on strings is
         # already ordinal case-insensitive by default).
@@ -592,45 +869,51 @@ function Get-MappingRows {
             $nameMatch = $exactCsp[0]
         }
 
-        # --- Reconcile the two independent signals -----------------------------
         $bestTier = $null
         $bestCsp = $null
         $bestNotes = ''
+        $matchCategory = $null
+        $corroborationChecked = $false
+        $corroborationPromoted = $false
 
-        if ($registryMatch -and $nameMatch) {
-            if ($registryMatch.Area -eq $nameMatch.Area -and $registryMatch.Policy -eq $nameMatch.Policy) {
-                # Strongest possible result: an independent registry-value
-                # signal and an exact name match both point at the same CSP
-                # policy.
-                $bestTier = 'A'
-                $bestCsp = $registryMatch
-                $bestNotes = "Tier A (corroborated): registry value name '$($admx.RegistryValue)' and exact ADMX/CSP name match both point to '$($bestCsp.Area)/$($bestCsp.Policy)'."
-            }
-            else {
-                # Conflict: the two signals disagree. Registry evidence is
-                # the more reliable signal and wins, but the rejected
-                # name-based candidate is preserved in Notes rather than
-                # discarded, so a human reviewer can see and adjudicate the
-                # disagreement.
-                $bestTier = 'A'
-                $bestCsp = $registryMatch
-                $bestNotes = "Tier A (registry match preferred over conflicting name match): registry value name '$($admx.RegistryValue)' matched '$($registryMatch.Area)/$($registryMatch.Policy)'; exact name match instead pointed to '$($nameMatch.Area)/$($nameMatch.Policy)', which was rejected in favor of the registry-based result."
-            }
-        }
-        elseif ($registryMatch) {
-            $bestTier = 'A'
-            $bestCsp = $registryMatch
-            $bestNotes = "Tier A (registry-only): registry value name '$($admx.RegistryValue)' unambiguously matched CSP policy '$($bestCsp.Area)/$($bestCsp.Policy)'. No corroborating name match was found."
-        }
-        elseif ($nameMatch) {
+        if ($nameMatch) {
             $bestTier = 'B'
             $bestCsp = $nameMatch
-            $bestNotes = "Tier B (name-only): exact match between ADMX policy name '$($admx.AdmxName)' and CSP policy name '$($bestCsp.Policy)'. No registry-value corroboration was found."
+            $matchCategory = 'NameOnly'
+            $bestNotes = "Tier B (name-only): exact match between ADMX policy name '$($admx.AdmxName)' and CSP policy name '$($bestCsp.Policy)'."
+
+            # --- Device corroboration (Tier B -> Tier A promotion) -------------
+            # Only ever attempted for a row that already has a Tier B name
+            # match; see Get-DeviceCorroboration for exactly what it checks
+            # and its known per-element-key limitation.
+            if (-not $SkipDeviceCorroboration) {
+                $corroborationChecked = $true
+                $corr = Get-DeviceCorroboration -Admx $admx -Csp $bestCsp -Scope $scope `
+                    -GpoRegistryEvidence $GpoRegistryEvidence -MdmEvidence $MdmEvidence
+
+                if ($corr.GpoConfigured -and $corr.MdmConfigured) {
+                    $bestTier = 'A'
+                    $matchCategory = 'DeviceCorroborated'
+                    $corroborationPromoted = $true
+                    $providerNote = if ($corr.WinningProvider) {
+                        " WinningProvider='$($corr.WinningProvider)'."
+                    }
+                    else {
+                        ' No _WinningProvider value was present for this policy.'
+                    }
+                    $bestNotes = "Tier A (device-corroborated): live registry evidence on THIS device shows both sides of this name match are currently configured - GPO: '$($corr.GpoEvidencePath)' = '$($corr.GpoEvidenceValue)'; MDM: '$($corr.MdmEvidencePath)' = '$($corr.MdmEvidenceValue)'.$providerNote This corroborates the Tier B name match with live, on-device proof; it does not by itself confirm the two settings are semantically identical - still review against Microsoft's Policy CSP documentation."
+                }
+                else {
+                    $missing = New-Object System.Collections.Generic.List[string]
+                    if (-not $corr.GpoConfigured) { $missing.Add("no currently-configured value found under the classic GPO registry evidence for this ADMX policy's key/valueName") }
+                    if (-not $corr.MdmConfigured) { $missing.Add('no currently-effective value found under the live MDM PolicyManager evidence for the matched CSP policy') }
+                    $bestNotes += " Device corroboration attempted but not conclusive: $($missing -join '; '). This does not mean the mapping is wrong - it usually just means this setting is not currently GPO-configured on this device."
+                }
+            }
         }
 
         # --- Tier C: fuzzy/normalized name similarity (review only) ------------
-        # Only attempted as a fallback when neither the registry-based nor the
-        # name-based method produced a match.
+        # Only attempted as a fallback when no name match was found at all.
         if (-not $bestTier -and $minRank -le $tierRank['C']) {
             $best = $null
             $bestScore = 0.0
@@ -657,6 +940,7 @@ function Get-MappingRows {
             if ($best -and $bestScore -ge 0.5) {
                 $bestTier = 'C'
                 $bestCsp = $best
+                $matchCategory = 'Fuzzy'
                 $bestNotes = "Tier C (REVIEW ONLY - not verified): fuzzy name similarity score $bestScore between ADMX display name '$($admx.DisplayName)' and CSP policy '$($best.Policy)'."
             }
         }
@@ -672,26 +956,21 @@ function Get-MappingRows {
 
         $sourceNote = "Source ADMX: $($admx.AdmxFile); ADMX policy name: $($admx.AdmxName)."
 
-        # MatchCategory is script-internal bookkeeping for the coverage
-        # summary (BothAgree / Conflict / RegistryOnly / NameOnly / Fuzzy);
-        # it is not part of the CSV schema, but every fact it represents is
-        # already spelled out in Notes for anyone reading the CSV directly.
-        $matchCategory =
-            if ($registryMatch -and $nameMatch -and $registryMatch.Area -eq $nameMatch.Area -and $registryMatch.Policy -eq $nameMatch.Policy) { 'BothAgree' }
-            elseif ($registryMatch -and $nameMatch) { 'Conflict' }
-            elseif ($registryMatch) { 'RegistryOnly' }
-            elseif ($nameMatch) { 'NameOnly' }
-            else { 'Fuzzy' }
-
+        # Tier/MatchCategory/Corroboration* are script-internal bookkeeping
+        # for the coverage summary; they are not part of the CSV schema, but
+        # every fact they represent is already spelled out in Notes for
+        # anyone reading the CSV directly.
         $results.Add([pscustomobject]@{
-            GpoSetting     = $admx.DisplayName
-            GpoName        = ''
-            CspArea        = $bestCsp.Area
-            CspPolicy      = $bestCsp.Policy
-            OmaUri         = New-OmaUri -Area $bestCsp.Area -Policy $bestCsp.Policy -Scope $scope
-            Notes          = (@($bestNotes, $sourceNote, $registryNote) | Where-Object { $_ }) -join ' '
-            Tier           = $bestTier
-            MatchCategory  = $matchCategory
+            GpoSetting             = $admx.DisplayName
+            GpoName                = ''
+            CspArea                = $bestCsp.Area
+            CspPolicy              = $bestCsp.Policy
+            OmaUri                 = New-OmaUri -Area $bestCsp.Area -Policy $bestCsp.Policy -Scope $scope
+            Notes                  = (@($bestNotes, $sourceNote, $registryNote) | Where-Object { $_ }) -join ' '
+            Tier                   = $bestTier
+            MatchCategory          = $matchCategory
+            CorroborationChecked   = $corroborationChecked
+            CorroborationPromoted  = $corroborationPromoted
         })
     }
 
@@ -713,23 +992,44 @@ Write-Log -Message 'Phase 2: reading the PolicyManager CSP catalog from the regi
 $cspCatalog = @(Get-CspCatalog)
 Write-Log -Message "Found $($cspCatalog.Count) CSP policy definition(s) under HKLM:\SOFTWARE\Microsoft\PolicyManager\default."
 
-Write-Log -Message 'Phase 3: joining ADMX policies to CSP policies...'
-$mappingRows = @(Get-MappingRows -AdmxCatalog $admxCatalog -CspCatalog $cspCatalog -IncludeUserScope:$IncludeUserScope -MinimumConfidence $MinimumConfidence)
+Write-Log -Message 'Phase 3: reading live device registry evidence for corroboration...'
+if ($SkipDeviceCorroboration) {
+    Write-Log -Message '-SkipDeviceCorroboration specified; skipping live registry evidence collection. Every match will stay at Tier B (or fall back to Tier C) - no rows can be promoted to Tier A on this run.'
+    $gpoRegistryEvidence = @()
+    $mdmEvidence = @()
+}
+else {
+    # Both reads are independently non-fatal (each already catches its own
+    # errors and returns @() - see Get-ClassicGpoRegistryEvidence /
+    # Get-LiveMdmEvidence), so a problem reading one does not prevent
+    # reading the other, and neither can abort the run.
+    $gpoRegistryEvidence = @(Get-ClassicGpoRegistryEvidence)
+    Write-Log -Message "Found $($gpoRegistryEvidence.Count) live classic-GPO registry value(s) under HKLM:\SOFTWARE\Policies and HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies."
+
+    $mdmEvidence = @(Get-LiveMdmEvidence)
+    Write-Log -Message "Found $($mdmEvidence.Count) live, currently-effective MDM PolicyManager policy value(s) under HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device."
+}
+
+Write-Log -Message 'Phase 4: joining ADMX policies to CSP policies...'
+$mappingRows = @(Get-MappingRows -AdmxCatalog $admxCatalog -CspCatalog $cspCatalog -IncludeUserScope:$IncludeUserScope `
+    -MinimumConfidence $MinimumConfidence -SkipDeviceCorroboration:$SkipDeviceCorroboration `
+    -GpoRegistryEvidence $gpoRegistryEvidence -MdmEvidence $mdmEvidence)
 
 $tierACount = @($mappingRows | Where-Object { $_.Tier -eq 'A' }).Count
 $tierBCount = @($mappingRows | Where-Object { $_.Tier -eq 'B' }).Count
 $tierCCount = @($mappingRows | Where-Object { $_.Tier -eq 'C' }).Count
 
-# Match-category breakdown within Tier A/B: how often the registry-based and
-# name-based signals actually corroborated each other on this machine versus
-# only one of them firing, and how often they disagreed outright (registry
-# wins on disagreement - see Get-MappingRows). This is the concrete answer to
-# "how much do the two signals actually agree in practice", which is not
-# knowable ahead of a real run.
-$bothAgreeCount    = @($mappingRows | Where-Object { $_.MatchCategory -eq 'BothAgree' }).Count
-$conflictCount     = @($mappingRows | Where-Object { $_.MatchCategory -eq 'Conflict' }).Count
-$registryOnlyCount = @($mappingRows | Where-Object { $_.MatchCategory -eq 'RegistryOnly' }).Count
-$nameOnlyCount     = @($mappingRows | Where-Object { $_.MatchCategory -eq 'NameOnly' }).Count
+# Device corroboration breakdown: of the Tier B name matches, how many were
+# actually checked against live device registry evidence, and how many of
+# those were promoted to Tier A because BOTH GpoConfigured and MdmConfigured
+# came back true. CorroborationPromoted rows are exactly the subset that
+# matters most: name-matched settings that are CURRENTLY, actually,
+# GPO-configured on this device AND have a live MDM equivalent with hard
+# registry-level proof - not just an unverified name coincidence. This is
+# necessarily a subset of the full catalog (only settings actually applied
+# via GPO on this device can ever be corroborated this way); see README.md.
+$corroborationCheckedCount  = @($mappingRows | Where-Object { $_.CorroborationChecked }).Count
+$corroborationPromotedCount = @($mappingRows | Where-Object { $_.CorroborationPromoted }).Count
 
 $mappedCspCount = @($mappingRows | Select-Object -Property CspArea, CspPolicy -Unique).Count
 $cspCoveragePct = if ($cspCatalog.Count -gt 0) {
@@ -738,21 +1038,16 @@ $cspCoveragePct = if ($cspCatalog.Count -gt 0) {
 else { 0 }
 
 Write-Log -Message '--- Coverage summary --------------------------------------------'
-Write-Log -Message "ADMX policies parsed:            $($admxCatalog.Count)"
-Write-Log -Message "CSP policies found:              $($cspCatalog.Count)"
-Write-Log -Message "Tier A rows (registry-based):    $tierACount"
-Write-Log -Message "  - both methods agreed:         $bothAgreeCount"
-Write-Log -Message "  - registry-only match:         $registryOnlyCount"
-Write-Log -Message "  - registry overrode a conflicting name match: $conflictCount"
-Write-Log -Message "Tier B rows (name-only match):   $tierBCount"
-Write-Log -Message "Tier C rows (fuzzy, review only): $tierCCount"
-Write-Log -Message "Total mapping rows:              $($mappingRows.Count)"
-Write-Log -Message "Distinct CSP policies mapped:     $mappedCspCount of $($cspCatalog.Count) ($cspCoveragePct%)"
+Write-Log -Message "ADMX policies parsed:                          $($admxCatalog.Count)"
+Write-Log -Message "CSP policies found:                            $($cspCatalog.Count)"
+Write-Log -Message "Tier A rows (device-corroborated):             $tierACount"
+Write-Log -Message "Tier B rows (name-only match):                 $tierBCount"
+Write-Log -Message "Tier C rows (fuzzy, review only):              $tierCCount"
+Write-Log -Message "Total mapping rows:                            $($mappingRows.Count)"
+Write-Log -Message "Distinct CSP policies mapped:                  $mappedCspCount of $($cspCatalog.Count) ($cspCoveragePct%)"
+Write-Log -Message "Name-matched rows checked for device corroboration: $corroborationCheckedCount"
+Write-Log -Message "  -> promoted to Tier A (GPO AND MDM both currently configured, live registry proof): $corroborationPromotedCount"
 Write-Log -Message '-------------------------------------------------------------------'
-
-if ($conflictCount -gt 0) {
-    Write-Log -Level WARN -Message "$conflictCount row(s) had a registry-based match that disagreed with the name-based match. Review these rows' Notes column closely before trusting them - see the 'registry match preferred over conflicting name match' text."
-}
 
 if ($mappingRows.Count -eq 0) {
     Write-Log -Level WARN -Message 'No mapping rows were produced. This can legitimately happen if the ADMX or CSP catalog was empty, or if MinimumConfidence excluded every candidate match. Check the coverage summary above.'
