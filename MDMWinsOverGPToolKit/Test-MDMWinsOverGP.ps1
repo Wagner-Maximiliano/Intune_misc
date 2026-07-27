@@ -2143,8 +2143,8 @@ $(Convert-ObjectsToHtmlTable -Rows ($HeuristicRows | Select-Object -First 250) -
 ) -Interactive -TableId 'heuristic-overlap-table' `
   -ColumnSortTypes @{ Confidence = 'number' } `
   -FilterColumns @('CspArea','WinningProvider') -StatusColumn 'Status')
-$blockedGpFootnote
 </div>
+$blockedGpFootnote
 
 <h2>ControlPolicyConflict state</h2>
 $(Convert-ObjectsToHtmlTable -Rows @($ConflictState) -Properties @(
