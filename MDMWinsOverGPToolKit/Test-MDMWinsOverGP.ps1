@@ -12,8 +12,10 @@
       - MDM diagnostic output
       - Registry policy snapshots
       - Candidate overlaps between GPO and MDM settings
-      - Verified overlaps supplied through an optional mapping CSV
-      - HTML and CSV reports
+      - Every applied GPO setting, left-joined to CSP mapping/MDM evidence
+        where known (see -MappingCsv / -GenerateMappings)
+      - An interactive, sortable/filterable, dark-mode-capable HTML report,
+        plus CSV reports
 
     Troubleshooting a run:
       - Log.txt (in the evidence root folder) is a timestamped, leveled
@@ -25,14 +27,53 @@
     Important:
       - Event 881 is treated as MDM PolicyManager activity, not proof of a GPO conflict.
       - Automatic name matching is heuristic.
-      - A verified one-to-one GPO-to-CSP mapping requires a mapping CSV or manual validation.
+      - A verified one-to-one GPO-to-CSP mapping requires a mapping CSV
+        (hand-curated, or auto-generated via -GenerateMappings /
+        Build-PolicyMappings.ps1) or manual validation.
       - MDMWinsOverGP applies to Policy CSP settings, not every Windows management CSP.
+      - This toolkit is designed for central deployment (network share, Intune
+        Win32 app, SCCM, RMM push): every path resolves from $PSScriptRoot,
+        never a hardcoded absolute path or the current working directory, and
+        input/output data lives under one "Data" folder next to the scripts
+        (falling back automatically to a machine-local ProgramData location
+        when the script folder is not writable). See -DataRoot below and
+        README.md's "Central deployment" section.
+      - Iterating on report/analysis logic (overlap matching, the Blocked
+        Group Policies parser, the HTML report) does not require re-running
+        collection or elevation: see -ReplayFromPath below.
 
 .PARAMETER OutputRoot
-    Parent folder for the evidence package.
+    Parent folder for the evidence package. Optional - when not supplied, the
+    effective root is chosen automatically (see -DataRoot below): normally
+    "<script folder>\Data\Evidence", or a machine-local fallback under
+    $env:ProgramData when the script folder is not writable. Passing this
+    parameter explicitly always wins over both the default and -DataRoot.
+
+.PARAMETER DataRoot
+    Optional. Forces the base folder under which this run's per-purpose data
+    subfolders (Evidence\, Mappings\, Input\) are created, for centrally
+    deployed scenarios (network share, Intune Win32 app, SCCM, RMM push)
+    where an administrator wants an explicit, predictable location rather
+    than the automatic script-folder-or-ProgramData choice. Ignored for a
+    given output when the caller also supplies the more specific explicit
+    path parameter for that output (e.g. -OutputRoot) - the specific
+    parameter always wins.
+
+    When neither -OutputRoot nor -DataRoot is supplied, this script first
+    tries "<script folder>\Data" (portable: works when the whole toolkit
+    folder is copied anywhere and the caller can write next to it, e.g. a
+    USB stick or a writable share). If that folder cannot actually be
+    written to - common when the script runs from a read-only UNC share, an
+    Intune package cache, or a signed/locked deployment folder - it falls
+    back automatically to "$env:ProgramData\MDMWinsOverGP\Data", a
+    machine-local location that is normally writable even when running as
+    SYSTEM. Either way, which root was chosen and why is logged at INFO.
 
 .PARAMETER SinceHours
     Number of hours of DeviceManagement events to include in CSV reports.
+    Has no effect when -ReplayFromPath is supplied (a WARN is logged if both
+    are passed together): replayed event data comes from the previous run's
+    own CSV exports as-is, not a new time-windowed collection.
 
 .PARAMETER MappingCsv
     Optional CSV containing verified GPO-to-CSP mappings.
@@ -45,42 +86,203 @@
       OmaUri
       Notes
 
+    If both -MappingCsv and -GenerateMappings are supplied, -MappingCsv wins
+    for the run and that choice is logged clearly; -GenerateMappings is only
+    used to produce the mapping when -MappingCsv was not supplied.
+
+.PARAMETER GenerateMappings
+    Before the mapping/overlap analysis step, runs Build-PolicyMappings.ps1
+    (resolved relative to this script's own folder via $PSScriptRoot, never
+    the current working directory - so this works regardless of how or from
+    where the script was launched) to auto-generate a GPO-to-CSP mapping CSV
+    from the local ADMX catalog and live registry evidence, filtered to the
+    GPO settings actually observed on this device in this run (via the
+    GPO-Settings.csv this script itself just wrote). The result is written
+    into this run's own evidence folder (under Reports\), never into the
+    caller's working directory, and is then used as the effective
+    -MappingCsv for the rest of the run - unless the caller also supplied an
+    explicit -MappingCsv, which always takes precedence (logged clearly
+    either way). Build-PolicyMappings.ps1 is invoked as a separate
+    powershell.exe child process (not dot-sourced) specifically so its own
+    Write-Log function, variables, and Set-StrictMode scope can never
+    collide with or clobber this script's; see Invoke-PolicyMappingsGenerator
+    for the full rationale. This entire step is non-fatal: if
+    Build-PolicyMappings.ps1 cannot be found or the child process fails, a
+    WARN is logged and collection continues exactly as if -GenerateMappings
+    had not been passed.
+
 .PARAMETER EnableDebugLog
     Enables the DeviceManagement-Enterprise-Diagnostics-Provider Debug channel.
+    Has no effect when -ReplayFromPath is supplied (a WARN is logged if both
+    are passed together): replay mode never touches this channel.
 
 .PARAMETER DisableDebugLogAfterCollection
     Disables the Debug channel after collection, but only when this run enabled it.
 
 .PARAMETER RunGpUpdate
     Runs gpupdate /force before collecting GPResult. This is best effort: if it
-    hangs or fails, the run logs the problem and continues.
+    hangs or fails, the run logs the problem and continues. Has no effect when
+    -ReplayFromPath is supplied (a WARN is logged if both are passed
+    together): replay mode never runs gpupdate.exe.
 
 .PARAMETER GpUpdateTimeoutSeconds
     Hard timeout for the gpupdate step. If gpupdate has not finished within this
     many seconds it is terminated and collection continues. Default 180.
 
 .PARAMETER SkipMdmDiagnostics
-    Skips MdmDiagnosticsTool.exe.
+    Skips MdmDiagnosticsTool.exe. The "Blocked Group Policies" table (see
+    README.md) is parsed from MDMDiagReport.html, a file
+    MdmDiagnosticsTool.exe itself produces, so skipping it also means that
+    table cannot be evaluated for this run - the HTML report and
+    Blocked-GroupPolicies.csv both say so explicitly (ParseStatus
+    'Skipped'), never a misleading "0 blocked policies found". Has no effect
+    when -ReplayFromPath is supplied (a WARN is logged if both are passed
+    together): replay mode never runs MdmDiagnosticsTool.exe live either
+    way - it always re-parses the replayed MDMDiagReport.html instead (see
+    -ReplayFromPath).
+
+.PARAMETER ReplayFromPath
+    Optional. Regenerates the analysis/report side of this toolkit (overlap
+    matching, the Blocked Group Policies parser, the interactive HTML
+    report, Summary metrics, Manifest.json, and everything else downstream)
+    from a PREVIOUS run's already-collected raw evidence, without
+    re-collecting anything and without requiring elevation. This is for
+    iterating repeatedly on the analysis/report code against the same real
+    device data - collection (gpresult, registry walks,
+    MdmDiagnosticsTool.exe, event export) is comparatively slow and requires
+    Administrator rights; the analysis/report side does not.
+
+    $ReplayFromPath must point at a folder previously produced by this
+    script (i.e. one of the "<ComputerName>-<timestamp>" folders under
+    Data\Evidence, or its unzipped equivalent). At minimum it must contain
+    GPResult\GPResult.xml, a Reports folder,
+    Registry\PolicyManager-AllValues.csv,
+    Reports\MDMWinsOverGP-State.csv, Reports\EventLog-Configuration.csv,
+    and Reports\DeviceManagement-Events.csv - this is validated up front,
+    before any output folder is created, and a specific, named list of
+    whatever is missing is thrown if the folder does not qualify, rather
+    than silently proceeding to produce an empty or misleading report.
+
+    What replay mode does instead of live collection:
+      - GPO settings are parsed from the replayed GPResult.xml (same parser
+        as a live run).
+      - MDM PolicyManager rows are read back from the replayed
+        Registry\PolicyManager-AllValues.csv.
+      - The classic GPO registry snapshot (not used in overlap analysis) is
+        copied forward unparsed.
+      - DeviceManagement event data is read back from the replayed
+        EventLog-Configuration.csv/DeviceManagement-Events.csv.
+      - The MDMWinsOverGP/ControlPolicyConflict state is read back from the
+        replayed Reports\MDMWinsOverGP-State.csv.
+      - The "Blocked Group Policies" table is deliberately NOT read back
+        from the old exported CSV - it is re-parsed live from the replayed
+        MDMDiagnostics\MDMDiagReport.html by Get-BlockedGroupPolicyRows, so
+        changes to that parser can be tested against the same real report
+        repeatedly.
+      - GPResult files, the MDMDiagnostics folder, .evtx files under
+        Events, and the classic registry CSV are all copied forward
+        untouched, so the new run's evidence folder is still one complete,
+        self-contained package with the same layout as a live run - never a
+        partial one.
+    Because Administrator rights are only required for the live-collection
+    steps this mode skips (registry reads under HKLM, event log
+    export/wevtutil, gpresult.exe, gpupdate.exe), -Test-IsAdministrator is
+    NOT enforced when -ReplayFromPath is supplied.
+
+    -SinceHours, -EnableDebugLog, -RunGpUpdate, and -SkipMdmDiagnostics have
+    no effect in replay mode (each logs a WARN if also passed, rather than
+    being silently ignored). -MappingCsv and -GenerateMappings keep working
+    normally: if neither is supplied, this script automatically looks for a
+    previously auto-generated mapping CSV
+    (Reports\PolicyMappings-Generated-Filtered.csv, or
+    Reports\PolicyMappings-Generated.csv as a fallback) under
+    $ReplayFromPath\Reports and reuses it if found (logged clearly either
+    way); an explicit -MappingCsv always wins, and -GenerateMappings can
+    still be passed to force a fresh, live mapping regeneration (that step
+    does not require elevation either and is unaffected by replay mode).
+
+    Every run - replayed or live - always produces a normal new
+    "<ComputerName>-<timestamp>" evidence folder; replay never overwrites or
+    reuses $ReplayFromPath's own folder. Manifest.json additionally records
+    IsReplay and ReplaySourceFolder for this run.
+
+.PARAMETER ResultsShare
+    Optional. A UNC path or any other writable folder. When supplied, after
+    the local evidence ZIP is created (in the script's own finally block,
+    so this also runs for a partial/failed "-PARTIAL" package - that is
+    still valuable diagnostic data for a central admin), the ZIP is also
+    copied there under its own unique, self-describing name
+    ("<ComputerName>-<timestamp>[-PARTIAL].zip"), so a fleet-wide deployment
+    (Intune Win32 app, SCCM, RMM push) can collect results from many
+    machines into one central location without each machine's package
+    colliding with another's.
+
+    This copy is entirely best-effort and non-fatal: an unreachable share,
+    an access-denied error, or a full disk is logged as a WARN and never
+    changes the run's outcome, exit code, or removes the local evidence -
+    the local ZIP in the evidence folder always remains regardless. When
+    the script runs as SYSTEM (the normal case for a centrally deployed
+    scheduled task/RMM push), the SYSTEM account of every target machine
+    needs write access to -ResultsShare; see README.md's "Central result
+    collection" section for how to grant that.
 
 .EXAMPLE
     .\Test-MDMWinsOverGP.ps1 -EnableDebugLog -RunGpUpdate
 
 .EXAMPLE
     .\Test-MDMWinsOverGP.ps1 -MappingCsv .\PolicyMappings.csv -SinceHours 48
+
+.EXAMPLE
+    .\Test-MDMWinsOverGP.ps1 -GenerateMappings -SinceHours 48
+
+.EXAMPLE
+    .\Test-MDMWinsOverGP.ps1 -DataRoot '\\fileserver\share\MDMWinsOverGP' -GenerateMappings
+
+.EXAMPLE
+    .\Test-MDMWinsOverGP.ps1 -GenerateMappings -ResultsShare '\\fileserver\share\MDMWinsOverGP-Results'
+
+.EXAMPLE
+    # Re-run just the analysis/report side against a previous run's raw
+    # evidence - no elevation required, nothing is re-collected.
+    .\Test-MDMWinsOverGP.ps1 -ReplayFromPath 'C:\ProgramData\MDMWinsOverGP\Data\Evidence\CONTOSO-PC01-20260701-120000'
+
+.NOTES
+    Exit code contract (for Intune Win32 apps, SCCM, and other RMM/
+    deployment tooling that inspects the process exit code - see README.md's
+    "Exit codes" section for consumption guidance):
+      0 - Completed successfully. No blocked GPOs or confirmed conflicts
+          were detected.
+      1 - Fatal error. Collection did not complete (see Log.txt and, if
+          present, COLLECTION-INCOMPLETE.txt in the evidence folder).
+      2 - Completed successfully, but blocked GPOs and/or confirmed
+          overlaps WERE detected. This is an actionable finding, not a
+          failure.
+      3 - Completed, but with degraded/partial evidence: MDM diagnostics
+          were skipped via -SkipMdmDiagnostics, or the "Blocked Group
+          Policies" table in MDMDiagReport.html could not be parsed. A "0"
+          elsewhere in the report is NOT conclusive when this code is
+          returned - review Log.txt and the HTML report before concluding
+          there is no conflict.
+    The exit code actually chosen for the run, and why, is always logged at
+    INFO as the last line written to Log.txt.
 #>
 
 [CmdletBinding()]
 param(
-    [string]$OutputRoot = "$env:PUBLIC\Documents\MDMWinsOverGP-Validation",
+    [string]$OutputRoot,
+    [string]$DataRoot,
     [ValidateRange(1, 720)]
     [int]$SinceHours = 24,
     [string]$MappingCsv,
+    [switch]$GenerateMappings,
     [switch]$EnableDebugLog,
     [switch]$DisableDebugLogAfterCollection,
     [switch]$RunGpUpdate,
     [ValidateRange(30, 3600)]
     [int]$GpUpdateTimeoutSeconds = 180,
-    [switch]$SkipMdmDiagnostics
+    [switch]$SkipMdmDiagnostics,
+    [string]$ResultsShare,
+    [string]$ReplayFromPath
 )
 
 Set-StrictMode -Version 2.0
@@ -134,6 +336,76 @@ function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+# Best-effort probe: can we actually create/write in $Path? Used to decide
+# whether the portable "<script folder>\Data" location is usable, or whether
+# this is a read-only/locked central deployment (UNC share, Intune package
+# cache, signed folder) that requires falling back to a machine-local
+# writable location instead. Never throws - a probe failure simply means
+# "not writable", which is exactly the condition this exists to detect, not
+# an error worth surfacing on its own.
+function Test-PathWritable {
+    param([Parameter(Mandatory)][string]$Path)
+
+    try {
+        New-Item -ItemType Directory -Path $Path -Force -ErrorAction Stop | Out-Null
+        $probeFile = Join-Path $Path ".write-test-$([guid]::NewGuid().ToString('N')).tmp"
+        Set-Content -LiteralPath $probeFile -Value 'probe' -Encoding UTF8 -ErrorAction Stop
+        Remove-Item -LiteralPath $probeFile -Force -ErrorAction SilentlyContinue
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
+# Resolves the effective base folder for one purpose-named data subfolder
+# (e.g. 'Evidence'), applying this toolkit's central-deployment precedence
+# rules (see the -OutputRoot/-DataRoot comment-based help above):
+#   1. An explicit path the caller passed for this exact output (e.g.
+#      -OutputRoot) always wins outright - not touched further.
+#   2. -DataRoot, if supplied, forces "<DataRoot>\<SubFolderName>" - for an
+#      administrator pinning a central-deployment location explicitly.
+#   3. Otherwise, try the portable "<script folder>\Data\<SubFolderName>"
+#      location, which is what makes the whole toolkit folder work when
+#      simply copied somewhere writable (USB stick, writable share).
+#   4. If (3) is not actually writable - the common case for a read-only UNC
+#      share, an Intune package cache, or a signed/locked deployment folder,
+#      i.e. exactly the central-deployment scenario this toolkit targets -
+#      fall back to a machine-local location under $env:ProgramData, which
+#      is normally writable even when running as SYSTEM.
+# Every branch is logged at INFO so a troubleshooter can see which root was
+# chosen and why without having to reproduce the decision by hand.
+function Resolve-DataRoot {
+    param(
+        [Parameter(Mandatory)][string]$ScriptRoot,
+        [string]$ExplicitPath,
+        [string]$DataRootOverride,
+        [Parameter(Mandatory)][string]$SubFolderName
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($ExplicitPath)) {
+        Write-Log -Message "Using the explicitly supplied path for '$SubFolderName': '$ExplicitPath'."
+        return $ExplicitPath
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($DataRootOverride)) {
+        $forced = Join-Path $DataRootOverride $SubFolderName
+        Write-Log -Message "Using -DataRoot override for the '$SubFolderName' data folder: '$forced'."
+        return $forced
+    }
+
+    $portableBase = Join-Path $ScriptRoot 'Data'
+    $portablePath = Join-Path $portableBase $SubFolderName
+    if (Test-PathWritable -Path $portableBase) {
+        Write-Log -Message "Script folder is writable; using the portable data location '$portablePath'."
+        return $portablePath
+    }
+
+    $fallbackPath = Join-Path (Join-Path $env:ProgramData 'MDMWinsOverGP\Data') $SubFolderName
+    Write-Log -Message "Script folder '$ScriptRoot' is not writable (common for a read-only UNC share, an Intune package cache, or a signed/locked deployment folder). Falling back to the machine-local data location '$fallbackPath'."
+    return $fallbackPath
 }
 
 # Strips characters that are illegal in Windows file names (e.g. from event
@@ -328,17 +600,46 @@ function Export-DmEvents {
                 StartTime = $StartTime
             } -ErrorAction Stop
 
-            foreach ($event in $events) {
+            # Loop variable is named $evt, NOT $event: $Event is a PowerShell
+            # automatic variable (normally populated inside
+            # Register-ObjectEvent/Register-EngineEvent handler scriptblocks).
+            # Reusing it as an ordinary foreach variable shadows the automatic
+            # variable for the lifetime of the loop, which was the prime
+            # suspect for event IDs coming through as 0 in earlier runs of
+            # this script. Every other automatic-variable name in this file
+            # ($input, $args, $matches, $host, $error, etc.) was also audited
+            # for the same mistake - none of the others were misused as plain
+            # loop/local variables.
+            foreach ($evt in $events) {
                 $message = ''
-                try { $message = $event.FormatDescription() } catch { $message = $event.Message }
+                try { $message = $evt.FormatDescription() } catch { $message = $evt.Message }
+
+                # Defensive ID capture: prefer the provider-authored .Id
+                # property. Do not silently fall back to 0 if it cannot be
+                # read - that would reproduce the exact misleading symptom
+                # this fix is for. RecordId (captured separately below) is a
+                # different concept - the log's own per-record sequence
+                # number - and is NOT a substitute for the provider's event
+                # ID, so it is intentionally not used as an Id fallback.
+                # EventLogRecord exposes no other alternate identifier, so
+                # when .Id genuinely cannot be read the field is left blank
+                # (visibly missing) rather than defaulted to 0.
+                $evtId = $null
+                try {
+                    $rawId = $evt.Id
+                    if ($null -ne $rawId) { $evtId = $rawId }
+                }
+                catch {
+                    Write-Verbose "Could not read the Id property for an event in $($evt.LogName): $($_.Exception.Message)"
+                }
 
                 $eventRows.Add([pscustomobject]@{
-                    TimeCreated = $event.TimeCreated
-                    LogName     = $event.LogName
-                    Id          = $event.Id
-                    Level       = $event.LevelDisplayName
-                    Provider    = $event.ProviderName
-                    RecordId    = $event.RecordId
+                    TimeCreated = $evt.TimeCreated
+                    LogName     = $evt.LogName
+                    Id          = if ($null -ne $evtId) { $evtId } else { '' }
+                    Level       = $evt.LevelDisplayName
+                    Provider    = $evt.ProviderName
+                    RecordId    = $evt.RecordId
                     Message     = ($message -replace "`r?`n", ' | ')
                 })
             }
@@ -442,7 +743,12 @@ function Invoke-GpUpdate {
 function Get-FirstNodeText {
     param(
         [Parameter(Mandatory)][System.Xml.XmlNode]$Node,
-        [Parameter(Mandatory)][string[]]$LocalNames
+        # AllowEmptyCollection alongside Mandatory: without it, PowerShell's
+        # binder rejects an empty array bound to a Mandatory array parameter
+        # as "no value supplied," even though every call site here always
+        # passes a non-empty literal - this is defensive, matching the
+        # blanket rule this toolkit follows for every Mandatory array param.
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$LocalNames
     )
 
     foreach ($name in $LocalNames) {
@@ -530,6 +836,225 @@ function Get-GpResultPolicyRows {
 
     return $rows.ToArray() |
         Sort-Object GpoSetting, GpoName, RegistryKey, RegistryValue -Unique
+}
+
+# Decodes the small, fixed set of HTML entities MdmDiagnosticsTool.exe's own
+# generated MDMDiagReport.html actually uses (&amp; &lt; &gt; &quot; &#39;
+# &nbsp;), plus generic numeric entities (&#NNN;) as a catch-all. This is
+# deliberately NOT a general-purpose HTML entity decoder - just enough for
+# this one report - because Get-BlockedGroupPolicyRows below cannot rely on
+# a real DOM/HTML parser (see its header comment for why).
+function ConvertFrom-HtmlEntitiesLite {
+    param([string]$Text)
+
+    if ([string]::IsNullOrEmpty($Text)) { return '' }
+
+    $decoded = $Text
+    $decoded = $decoded -replace '&nbsp;', ' '
+    $decoded = $decoded -replace '&lt;', '<'
+    $decoded = $decoded -replace '&gt;', '>'
+    $decoded = $decoded -replace '&quot;', '"'
+    $decoded = $decoded -replace '&#39;', "'"
+    $decoded = $decoded -replace '&apos;', "'"
+    # Generic decimal numeric entities. Deliberately anchored/bounded (no
+    # unbounded lookaround) so this cannot backtrack badly.
+    $decoded = [System.Text.RegularExpressions.Regex]::Replace(
+        $decoded, '&#(\d{1,7});',
+        { param($m) [string][char][int]$m.Groups[1].Value }
+    )
+    # &amp; must be decoded LAST - decoding it earlier would turn a literal
+    # "&amp;lt;" (an already-escaped "&lt;" in the source data) into "&lt;"
+    # and then wrongly decode that too on a second pass.
+    $decoded = $decoded -replace '&amp;', '&'
+    return $decoded
+}
+
+# Strips HTML tags out of one table cell's inner HTML, decodes entities, and
+# collapses whitespace/newlines (MDMDiagReport.html's generated markup is
+# not reliably single-line) into a single space, leaving clean display text
+# suitable for CSV/HTML output.
+function ConvertFrom-HtmlCellText {
+    param([string]$Html)
+
+    if ([string]::IsNullOrEmpty($Html)) { return '' }
+
+    $noTags = [System.Text.RegularExpressions.Regex]::Replace($Html, '<[^>]*>', ' ')
+    $decoded = ConvertFrom-HtmlEntitiesLite -Text $noTags
+    return ($decoded -replace '\s+', ' ').Trim()
+}
+
+# Locates and parses the "Blocked Group Policies" table from
+# MdmDiagnosticsTool.exe's own MDMDiagReport.html - subtitled "Group
+# Policies that were blocked from GP Engine because MDM has configured the
+# equivalent policy". This is Windows' own authoritative statement of which
+# GPOs were actually blocked in favor of MDM - far stronger evidence than
+# any name-matching or registry inference elsewhere in this toolkit.
+#
+# Why regex/string parsing instead of a DOM parser: Invoke-WebRequest
+# -UseBasicParsing does not produce a usable DOM for a local file under
+# Windows PowerShell 5.1, and the alternative (the HTMLFile COM object)
+# depends on legacy MSHTML/IE components that are not guaranteed present on
+# a modern Windows 11 device - exactly this toolkit's central-deployment
+# target. Parsing is therefore done with narrow, non-greedy, explicitly
+# timeout-bounded [regex] patterns instead, on the assumption that Microsoft
+# can change this report's markup at any time without notice - every step
+# below is written to fail safely (a specific, distinct ParseStatus) rather
+# than to guess.
+#
+# The distinction between "the table was genuinely empty" (ParseStatus
+# 'EmptyTable' - Windows reported zero blocked GPOs, good news) and "we
+# could not parse the table" (HeadingNotFound/TableNotFound/FileMissing/
+# ParseError - unknown, NOT good news) is preserved end to end via
+# ParseStatus specifically so callers (the HTML report, the exit-code logic)
+# never collapse those two very different situations into the same "0".
+function Get-BlockedGroupPolicyRows {
+    param(
+        [Parameter(Mandatory)][string]$MdmDiagnosticsFolder
+    )
+
+    $result = [pscustomobject]@{
+        ParseStatus = 'FileMissing'
+        ReportPath  = $null
+        Rows        = @()
+        Message     = ''
+    }
+
+    if (-not (Test-Path -LiteralPath $MdmDiagnosticsFolder)) {
+        $result.Message = "MDM diagnostics folder '$MdmDiagnosticsFolder' does not exist, so MDMDiagReport.html could not be located."
+        return $result
+    }
+
+    $reportFile = Get-ChildItem -LiteralPath $MdmDiagnosticsFolder -Filter 'MDMDiagReport.html' `
+        -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+
+    if (-not $reportFile) {
+        $result.Message = "MDMDiagReport.html was not found under '$MdmDiagnosticsFolder'. MdmDiagnosticsTool.exe may have failed, or its output layout may have changed."
+        return $result
+    }
+
+    $result.ReportPath = $reportFile.FullName
+
+    try {
+        $raw = Get-Content -LiteralPath $reportFile.FullName -Raw -ErrorAction Stop
+    }
+    catch {
+        $result.ParseStatus = 'ParseError'
+        $result.Message = "Could not read '$($reportFile.FullName)'. $($_.Exception.Message)"
+        return $result
+    }
+
+    try {
+        $regexTimeout = [TimeSpan]::FromSeconds(10)
+
+        # Locate the "Blocked Group Policies" heading text. The report can
+        # wrap it in any tag (h1/h2/div/span/...), so match the text itself
+        # rather than assuming a tag name - but keep the pattern a handful of
+        # literal words with bounded \s+ runs (no unbounded wildcards), so
+        # this cannot backtrack badly even on a multi-megabyte report.
+        $headingRegex = [System.Text.RegularExpressions.Regex]::new(
+            'Blocked\s+Group\s+Policies',
+            [System.Text.RegularExpressions.RegexOptions]::IgnoreCase,
+            $regexTimeout
+        )
+        $headingMatch = $headingRegex.Match($raw)
+
+        if (-not $headingMatch.Success) {
+            $result.ParseStatus = 'HeadingNotFound'
+            $result.Message = "The 'Blocked Group Policies' heading text was not found in '$($reportFile.FullName)'. MDMDiagReport.html's layout may have changed."
+            return $result
+        }
+
+        # Search for the next <table>...</table> ONLY in the text after the
+        # heading (Substring), never the whole document, and non-greedily -
+        # both are deliberate to avoid catastrophic backtracking on a large
+        # file.
+        $afterHeading = $raw.Substring($headingMatch.Index)
+
+        $tableRegex = [System.Text.RegularExpressions.Regex]::new(
+            '<table\b[^>]*>(?<body>.*?)</table>',
+            ([System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor
+             [System.Text.RegularExpressions.RegexOptions]::Singleline),
+            $regexTimeout
+        )
+        $tableMatch = $tableRegex.Match($afterHeading)
+
+        if (-not $tableMatch.Success) {
+            $result.ParseStatus = 'TableNotFound'
+            $result.Message = "The 'Blocked Group Policies' heading was found, but no following <table> could be located in '$($reportFile.FullName)'. MDMDiagReport.html's layout may have changed."
+            return $result
+        }
+
+        $tableHtml = $tableMatch.Groups['body'].Value
+
+        $rowRegex = [System.Text.RegularExpressions.Regex]::new(
+            '<tr\b[^>]*>(?<row>.*?)</tr>',
+            ([System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor
+             [System.Text.RegularExpressions.RegexOptions]::Singleline),
+            $regexTimeout
+        )
+        $cellRegex = [System.Text.RegularExpressions.Regex]::new(
+            '<t[dh]\b[^>]*>(?<cell>.*?)</t[dh]>',
+            ([System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor
+             [System.Text.RegularExpressions.RegexOptions]::Singleline),
+            $regexTimeout
+        )
+
+        $rows = New-Object System.Collections.Generic.List[object]
+        $rowMatches = $rowRegex.Matches($tableHtml)
+
+        foreach ($rowMatch in $rowMatches) {
+            # Per-row try/catch: one malformed row must never abort parsing
+            # of the rest of the table, matching this toolkit's blanket
+            # per-item error-handling convention.
+            try {
+                $rowHtml = $rowMatch.Groups['row'].Value
+                $cellMatches = $cellRegex.Matches($rowHtml)
+                if ($cellMatches.Count -eq 0) { continue }
+
+                $cellTexts = @($cellMatches | ForEach-Object { ConvertFrom-HtmlCellText -Html $_.Groups['cell'].Value })
+
+                # Skip the header row: its cells are normally <th>, but as a
+                # fallback for a report that uses <td> for the header too,
+                # also recognize it by its first cell's text.
+                $isHeaderRow = ($rowHtml -match '<th\b') -or
+                    ($cellTexts.Count -gt 0 -and $cellTexts[0] -match '^Blocked\s+GP\s+Entity$')
+                if ($isHeaderRow) { continue }
+
+                if ($cellTexts.Count -lt 4) {
+                    Write-Log -Level WARN -Message "Skipped a row in the 'Blocked Group Policies' table with fewer than 4 cells ($($cellTexts.Count) found) in '$($reportFile.FullName)'."
+                    continue
+                }
+
+                $rows.Add([pscustomobject]@{
+                    BlockedGpEntity    = $cellTexts[0]
+                    BlockedGpValueName = $cellTexts[1]
+                    BlockedValue       = $cellTexts[2]
+                    MdmUrisBlockingGp  = $cellTexts[3]
+                })
+            }
+            catch {
+                Write-Log -Level WARN -Message "Could not parse a row in the 'Blocked Group Policies' table in '$($reportFile.FullName)'. $($_.Exception.Message)"
+            }
+        }
+
+        $result.Rows = $rows.ToArray()
+
+        if ($result.Rows.Count -eq 0) {
+            $result.ParseStatus = 'EmptyTable'
+            $result.Message = "The 'Blocked Group Policies' table was located in '$($reportFile.FullName)' and contains no data rows - Windows genuinely reported no Group Policies blocked in favor of MDM on this device."
+        }
+        else {
+            $result.ParseStatus = 'Found'
+            $result.Message = "Parsed $($result.Rows.Count) blocked Group Policy row(s) from '$($reportFile.FullName)'."
+        }
+
+        return $result
+    }
+    catch {
+        $result.ParseStatus = 'ParseError'
+        $result.Message = "Unexpected error parsing '$($reportFile.FullName)'. $($_.Exception.Message)"
+        return $result
+    }
 }
 
 # Lowercases, strips common policy-name verb prefixes (allow/enable/...),
@@ -674,11 +1199,125 @@ function Import-VerifiedMappings {
     }
 }
 
-# For each human-verified mapping row, checks whether the GPO side and the
-# MDM side were actually observed in this run's evidence and produces a
-# report row with a plain-English status. This is the highest-confidence
-# overlap evidence the report can show (Confidence = 1), since it is based
-# on a mapping a person confirmed rather than name-similarity guessing.
+# Implements -GenerateMappings: runs Build-PolicyMappings.ps1 to auto-
+# generate a starting-point GPO-to-CSP mapping CSV, filtered to the GPO
+# settings actually observed on this device in this run, and returns the
+# path to the resulting "*-Filtered.csv" (or $null on any failure/absence -
+# every failure mode here is non-fatal to the caller by design).
+#
+# Why a child powershell.exe process instead of dot-sourcing:
+# Build-PolicyMappings.ps1 is a large, independently-maintained standalone
+# script with its own Set-StrictMode -Version 2, its own Write-Log function,
+# and dozens of its own script-scope-adjacent variables ($admxCatalog,
+# $cspCatalog, $mappingRows, etc.). Dot-sourcing it would run all of that
+# directly in this script's scope, so its Write-Log would silently replace
+# this script's Write-Log (breaking Log.txt), and any variable name
+# collision (deliberate or accidental, now or in a future edit to either
+# script) would silently clobber state in either direction. A child
+# "powershell.exe -File" process gets a completely independent process,
+# scope, and $ErrorActionPreference, so nothing it does - success or
+# failure - can ever reach back into this script's state. The only price is
+# marshalling its console output back in (captured and re-logged below) and
+# checking its exit code / the file it was supposed to produce.
+function Invoke-PolicyMappingsGenerator {
+    param(
+        [Parameter(Mandatory)][string]$ScriptRoot,
+        [Parameter(Mandatory)][string]$ReportsFolder,
+        [Parameter(Mandatory)][string]$GpoSettingsCsvPath
+    )
+
+    $builderPath = Join-Path $ScriptRoot 'Build-PolicyMappings.ps1'
+    if (-not (Test-Path -LiteralPath $builderPath)) {
+        Write-Log -Level WARN -Message "-GenerateMappings was specified, but Build-PolicyMappings.ps1 was not found next to this script at '$builderPath'. Continuing without an auto-generated mapping."
+        return $null
+    }
+
+    # Output goes into THIS run's own evidence folder (Reports\), never the
+    # caller's working directory or the standalone Data\Mappings location -
+    # an -OutputPath is always an explicit path, so Build-PolicyMappings.ps1's
+    # own Resolve-DataRoot logic is bypassed entirely and this is exactly
+    # where the file lands, deterministically, every time.
+    $generatedPath = Join-Path $ReportsFolder 'PolicyMappings-Generated.csv'
+    $filteredPath  = Join-Path $ReportsFolder 'PolicyMappings-Generated-Filtered.csv'
+
+    $powershellExe = Join-Path $PSHOME 'powershell.exe'
+    if (-not (Test-Path -LiteralPath $powershellExe)) {
+        # Fall back to whatever is on PATH (e.g. pwsh.exe under PowerShell 7)
+        # if the Windows PowerShell 5.1 host path is not present.
+        $powershellExe = 'powershell.exe'
+    }
+
+    $arguments = @(
+        '-NoProfile'
+        '-NonInteractive'
+        '-ExecutionPolicy', 'Bypass'
+        '-File', $builderPath
+        '-OutputPath', $generatedPath
+        '-GpoSettingsCsv', $GpoSettingsCsvPath
+    )
+
+    Write-Log -Message "Running Build-PolicyMappings.ps1 as a child process to auto-generate a mapping CSV filtered to this device's GPO settings..."
+
+    try {
+        # Capture combined stdout/stderr from the child process and re-log
+        # every line through this script's own Write-Log, so the generator's
+        # progress/coverage-summary output ends up in Log.txt alongside
+        # everything else this run did, without letting its own Write-Log
+        # function ever execute in this script's scope.
+        $childOutput = & $powershellExe @arguments 2>&1
+        $childExitCode = $LASTEXITCODE
+
+        foreach ($outputLine in $childOutput) {
+            Write-Log -Message "[Build-PolicyMappings] $outputLine"
+        }
+
+        if ($childExitCode -ne 0) {
+            Write-Log -Level WARN -Message "Build-PolicyMappings.ps1 exited with code $childExitCode. Continuing without an auto-generated mapping."
+            return $null
+        }
+
+        if (-not (Test-Path -LiteralPath $filteredPath)) {
+            # A filtered CSV is only written when GpoSettingsCsv matched at
+            # least one row inside Build-PolicyMappings.ps1 - see its own
+            # non-fatal handling of an empty/missing GpoSettingsCsv. Falling
+            # back to the unfiltered output keeps this run usable instead of
+            # silently discarding a mapping that was in fact generated.
+            if (Test-Path -LiteralPath $generatedPath) {
+                Write-Log -Level WARN -Message "Build-PolicyMappings.ps1 did not produce a filtered mapping CSV at '$filteredPath'; falling back to the unfiltered mapping at '$generatedPath'."
+                return $generatedPath
+            }
+
+            Write-Log -Level WARN -Message "Build-PolicyMappings.ps1 completed but produced no mapping CSV at '$generatedPath' or '$filteredPath'. Continuing without an auto-generated mapping."
+            return $null
+        }
+
+        Write-Log -Message "Auto-generated, device-filtered mapping CSV: '$filteredPath'."
+        return $filteredPath
+    }
+    catch {
+        Write-Log -Level WARN -Message "Failed to run Build-PolicyMappings.ps1. Continuing without an auto-generated mapping. $($_.Exception.Message)"
+        return $null
+    }
+}
+
+# For EVERY GPO setting actually applied on this device (from GPResult),
+# left-joins it to the optional -MappingCsv and to MDM evidence, and
+# produces a report row with a plain-English status. This is an inversion of
+# the original design, which iterated $Mappings and therefore only ever
+# showed GPO settings that already had a mapping row - the majority of a
+# device's applied GPO settings (which typically have no known CSP mapping)
+# never appeared at all. Now every applied GPO setting is represented:
+#   - has a mapping AND MDM evidence  -> "Confirmed overlap" (this is the
+#     highest-confidence evidence the report can show, since it is based on
+#     a mapping a person or Build-PolicyMappings.ps1 produced, not
+#     name-similarity guessing at report time).
+#   - has a mapping but no MDM evidence -> mapped, MDM side not configured.
+#   - has NO mapping at all -> 'No known CSP mapping'. This is expected to
+#     be the common case (most GPO settings have no documented Policy CSP
+#     equivalent), not an error condition.
+# GPResult can yield the same setting more than once (e.g. across categories
+# or policy extensions), so rows are deduplicated by (GpoSetting, GpoName)
+# before the join.
 function Get-VerifiedOverlapRows {
     param(
         [object[]]$Mappings,
@@ -686,48 +1325,70 @@ function Get-VerifiedOverlapRows {
         [object[]]$MdmRows
     )
 
-    foreach ($mapping in $Mappings) {
-        $matchingGpo = @(
-            $GpoRows | Where-Object {
-                ($_.GpoSetting -eq $mapping.GpoSetting -or
-                 (Normalize-PolicyName $_.GpoSetting) -eq (Normalize-PolicyName $mapping.GpoSetting)) -and
-                ([string]::IsNullOrWhiteSpace($mapping.GpoName) -or $_.GpoName -eq $mapping.GpoName)
-            }
-        )
+    $distinctGpoRows = @(
+        $GpoRows |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_.GpoSetting) } |
+        Group-Object GpoSetting, GpoName |
+        ForEach-Object { $_.Group | Select-Object -First 1 }
+    )
 
-        $matchingMdm = @(
-            $MdmRows | Where-Object {
-                $_.Area -eq $mapping.CspArea -and
-                ($_.Policy -eq $mapping.CspPolicy -or $_.ValueName -eq $mapping.CspPolicy)
+    foreach ($gpo in $distinctGpoRows) {
+        # A mapping row's GpoName is an optional additional filter (some GPO
+        # setting names are ambiguous without knowing which GPO won them);
+        # when the mapping row supplies one, require it to match too.
+        $mapping = $Mappings | Where-Object {
+            (
+                $_.GpoSetting -eq $gpo.GpoSetting -or
+                (Normalize-PolicyName $_.GpoSetting) -eq (Normalize-PolicyName $gpo.GpoSetting)
+            ) -and (
+                [string]::IsNullOrWhiteSpace($_.GpoName) -or $_.GpoName -eq $gpo.GpoName
+            )
+        } | Select-Object -First 1
+
+        $matchingMdm = @()
+        if ($mapping) {
+            $matchingMdm = @(
+                $MdmRows | Where-Object {
+                    $_.Area -eq $mapping.CspArea -and
+                    ($_.Policy -eq $mapping.CspPolicy -or $_.ValueName -eq $mapping.CspPolicy)
+                }
+            )
+        }
+
+        # This row exists precisely because it is an applied GPO setting
+        # observed in GPResult, so GpoConfigured is always true here - unlike
+        # the old mapping-first design, there is no "mapped but GPO side
+        # missing" case any more; a mapping row whose GPO setting never
+        # appears in GPResult simply never produces a row (nothing to join
+        # it to). MdmConfigured is only meaningful once a mapping exists.
+        $mdmConfigured = $matchingMdm.Count -gt 0
+
+        $status =
+            if (-not $mapping) {
+                'No known CSP mapping'
             }
-        )
+            elseif ($mdmConfigured) {
+                'Confirmed overlap. Validate effective value and behavior.'
+            }
+            else {
+                'Mapped to a CSP policy, but no MDM evidence was observed for it.'
+            }
 
         [pscustomobject]@{
-            MatchType         = 'Verified mapping'
-            Confidence        = 1
-            GpoConfigured     = $matchingGpo.Count -gt 0
-            MdmConfigured     = $matchingMdm.Count -gt 0
-            GpoSetting        = $mapping.GpoSetting
-            GpoName           = (@($matchingGpo | ForEach-Object { $_.GpoName }) | Where-Object { $_ } | Sort-Object -Unique) -join '; '
-            GpoState          = (@($matchingGpo | ForEach-Object { $_.State }) | Where-Object { $_ } | Sort-Object -Unique) -join '; '
-            CspArea           = $mapping.CspArea
-            CspPolicy         = $mapping.CspPolicy
+            MatchType         = if ($mapping) { 'Verified mapping' } else { 'No mapping' }
+            Confidence        = if ($mapping) { 1 } else { 0 }
+            GpoConfigured     = $true
+            MdmConfigured     = $mdmConfigured
+            GpoSetting        = $gpo.GpoSetting
+            GpoName           = $gpo.GpoName
+            GpoState          = $gpo.State
+            CspArea           = if ($mapping) { $mapping.CspArea } else { '' }
+            CspPolicy         = if ($mapping) { $mapping.CspPolicy } else { '' }
             MdmEffectiveValue = (@($matchingMdm | ForEach-Object { $_.EffectiveValue }) | Where-Object { $_ } | Sort-Object -Unique) -join '; '
             WinningProvider   = (@($matchingMdm | ForEach-Object { $_.WinningProvider }) | Where-Object { $_ } | Sort-Object -Unique) -join '; '
-            OmaUri            = $mapping.OmaUri
-            Status            = if ($matchingGpo.Count -gt 0 -and $matchingMdm.Count -gt 0) {
-                                    'Confirmed overlap. Validate effective value and behavior.'
-                                }
-                                elseif ($matchingMdm.Count -gt 0) {
-                                    'Mapped setting found only in MDM evidence.'
-                                }
-                                elseif ($matchingGpo.Count -gt 0) {
-                                    'Mapped setting found only in GPO evidence.'
-                                }
-                                else {
-                                    'Mapping not found in collected evidence.'
-                                }
-            Notes             = $mapping.Notes
+            OmaUri            = if ($mapping) { $mapping.OmaUri } else { '' }
+            Status            = $status
+            Notes             = if ($mapping) { $mapping.Notes } else { '' }
         }
     }
 }
@@ -813,32 +1474,245 @@ function ConvertTo-HtmlEncoded {
     return [System.Net.WebUtility]::HtmlEncode([string]$Value)
 }
 
+# Maps a report row's plain-English Status text to a semantic red/amber/green
+# CSS class (see the .status-* rules in $css inside New-HtmlReport). Matched
+# by substring/regex on purpose - Status is free text produced in a few
+# different places in this script (Get-VerifiedOverlapRows), and this keeps
+# working even if that wording is tweaked slightly, not only for one exact
+# string. Returns '' (no class, no color) for anything unrecognized, so an
+# unexpected Status value degrades to "uncolored", never to a misleading color.
+function Get-StatusCssClass {
+    param([string]$Status)
+
+    if ([string]::IsNullOrWhiteSpace($Status)) { return '' }
+
+    if ($Status -match 'Confirmed overlap') { return 'status-red' }
+    if ($Status -match 'No known CSP mapping') { return 'status-green' }
+    if ($Status -match 'Mapped to a CSP policy, but no MDM evidence') { return 'status-amber' }
+    if ($Status -match 'Candidate only') { return 'status-amber' }
+    if ($Status -match 'not found|not conclusive') { return 'status-amber' }
+    return ''
+}
+
+# Maps an event's LevelDisplayName to the same red/amber/green scheme used
+# for Status above, for the "Recent warnings and errors" table.
+function Get-LevelCssClass {
+    param([string]$Level)
+
+    switch ($Level) {
+        'Critical'    { return 'status-red' }
+        'Error'       { return 'status-red' }
+        'Warning'     { return 'status-amber' }
+        'Information' { return 'status-green' }
+        default       { return '' }
+    }
+}
+
 # Renders a collection of objects as an HTML table, one column per named
 # property, with every cell HTML-encoded to prevent broken markup or HTML
 # injection from registry/event data that happens to contain HTML-special
 # characters. Renders a friendly empty-state message instead of an empty
 # table when Rows has no items (this is common and expected, e.g. no GPO
 # settings applied, no verified mappings supplied).
+#
+# -Interactive opts a single table into client-side sorting (and, with
+# -FilterColumns, dropdown filtering) via the inline <script> block New-
+# HtmlReport embeds once for the whole page - see $reportScript there. This
+# is OFF by default so every existing call site keeps rendering exactly the
+# plain static table it always has; only the two call sites in New-HtmlReport
+# that ask for it (Applied GPO settings, Recent warnings and errors) opt in.
+#
+# How sorting/filtering data reaches the browser without weakening HTML
+# encoding: every value written into a data-cN attribute (one per column,
+# N = 0-based column index, matching each <th>'s data-col) is passed through
+# the exact same ConvertTo-HtmlEncoded used for the visible <td> text - n->
+# no extra/weaker encoding path is introduced for the interactive case.
 function Convert-ObjectsToHtmlTable {
     param(
         [object[]]$Rows,
-        [string[]]$Properties,
-        [string]$EmptyMessage = 'No records found.'
+        # Defaults to an empty array (never $null) so a direct .Count access
+        # on $Properties further down can never trip Set-StrictMode -Version
+        # 2's "property 'Count' cannot be found on this object" even if a
+        # future call site forgets to pass -Properties.
+        [string[]]$Properties = @(),
+        [string]$EmptyMessage = 'No records found.',
+        [switch]$Interactive,
+        [string]$TableId,
+        [string[]]$FilterColumns = @(),
+        # Maps a property name to a client-side sort-type hint: 'date',
+        # 'number', or 'severity' (ranked, not alphabetical - see the
+        # severityRank map in $reportScript). Any column not listed here
+        # sorts as plain case-insensitive text. Only consulted when
+        # -Interactive is set.
+        [hashtable]$ColumnSortTypes = @{},
+        # Optional property name whose value (via Get-StatusCssClass) sets a
+        # semantic red/amber/green class on each <tr>.
+        [string]$StatusColumn,
+        # Optional property name whose value (via Get-LevelCssClass) sets a
+        # semantic red/amber/green class on each <tr>.
+        [string]$LevelColumn
     )
 
     if (-not $Rows -or $Rows.Count -eq 0) {
         return "<p>$([System.Net.WebUtility]::HtmlEncode($EmptyMessage))</p>"
     }
 
-    $header = ($Properties | ForEach-Object { "<th>$(ConvertTo-HtmlEncoded $_)</th>" }) -join ''
+    if ($Interactive -and [string]::IsNullOrWhiteSpace($TableId)) {
+        # Programming error, not a data/runtime condition - every interactive
+        # call site in this file supplies a literal -TableId, so this can
+        # only fire if a future call site forgets to.
+        throw 'Convert-ObjectsToHtmlTable: -TableId is required when -Interactive is specified.'
+    }
+
+    $headerCells = for ($i = 0; $i -lt $Properties.Count; $i++) {
+        $propertyName = $Properties[$i]
+        $encodedName = ConvertTo-HtmlEncoded $propertyName
+        if ($Interactive) {
+            $sortType = if ($ColumnSortTypes.ContainsKey($propertyName)) { $ColumnSortTypes[$propertyName] } else { 'text' }
+            "<th data-col=""$i"" data-sort=""$(ConvertTo-HtmlEncoded $sortType)"" class=""sortable"">$encodedName<span class=""sort-indicator""></span></th>"
+        }
+        else {
+            "<th>$encodedName</th>"
+        }
+    }
+    $header = $headerCells -join ''
+
     $bodyRows = foreach ($row in $Rows) {
+        $rowClasses = New-Object System.Collections.Generic.List[string]
+        if ($StatusColumn -and $row.PSObject.Properties.Match($StatusColumn).Count -gt 0) {
+            $statusClass = Get-StatusCssClass -Status ([string]$row.$StatusColumn)
+            if ($statusClass) { $rowClasses.Add($statusClass) }
+        }
+        if ($LevelColumn -and $row.PSObject.Properties.Match($LevelColumn).Count -gt 0) {
+            $levelClass = Get-LevelCssClass -Level ([string]$row.$LevelColumn)
+            if ($levelClass) { $rowClasses.Add($levelClass) }
+        }
+        $classAttr = if ($rowClasses.Count -gt 0) { " class=""$($rowClasses -join ' ')""" } else { '' }
+
+        $dataAttr = ''
+        if ($Interactive) {
+            $attrParts = for ($i = 0; $i -lt $Properties.Count; $i++) {
+                $propertyName = $Properties[$i]
+                $rawValue = $row.$propertyName
+                $sortType = if ($ColumnSortTypes.ContainsKey($propertyName)) { $ColumnSortTypes[$propertyName] } else { 'text' }
+                # Dates get a stable, locale-independent sort key (round-trip
+                # 'o' format) distinct from whatever locale-formatted text the
+                # visible <td> shows, so sorting is correct regardless of how
+                # the value happens to display. Everything else sorts on the
+                # same text the cell shows.
+                $sortValue = if ($sortType -eq 'date' -and $rawValue -is [datetime]) {
+                    $rawValue.ToString('o')
+                }
+                else {
+                    [string]$rawValue
+                }
+                "data-c$i=""$(ConvertTo-HtmlEncoded $sortValue)"""
+            }
+            $dataAttr = ' ' + ($attrParts -join ' ')
+        }
+
         $cells = foreach ($property in $Properties) {
             "<td>$(ConvertTo-HtmlEncoded $row.$property)</td>"
         }
-        "<tr>$($cells -join '')</tr>"
+        "<tr$classAttr$dataAttr>$($cells -join '')</tr>"
     }
 
-    return "<table><thead><tr>$header</tr></thead><tbody>$($bodyRows -join "`n")</tbody></table>"
+    $tableAttrs = if ($Interactive) { " id=""$(ConvertTo-HtmlEncoded $TableId)"" class=""interactive-table""" } else { '' }
+    $table = "<table$tableAttrs><thead><tr>$header</tr></thead><tbody>$($bodyRows -join "`n")</tbody></table>"
+
+    if ($Interactive -and $FilterColumns.Count -gt 0) {
+        # One <select> per requested filter column, auto-populated with the
+        # distinct values actually present in $Rows (never a hardcoded
+        # list) plus an "All" option. data-filter-col matches the column's
+        # data-col/data-cN index so the JS can locate it without depending
+        # on column order or property names at runtime.
+        $filterControls = foreach ($filterColumn in $FilterColumns) {
+            $colIndex = [array]::IndexOf($Properties, $filterColumn)
+            if ($colIndex -lt 0) { continue }
+
+            $distinctValues = @(
+                $Rows | ForEach-Object { [string]$_.$filterColumn } |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                Sort-Object -Unique
+            )
+
+            if ($distinctValues.Count -eq 0) { continue }
+
+            $optionTags = foreach ($value in $distinctValues) {
+                "<option value=""$(ConvertTo-HtmlEncoded $value)"">$(ConvertTo-HtmlEncoded $value)</option>"
+            }
+
+            $labelText = ConvertTo-HtmlEncoded $filterColumn
+            "<label class=""filter-label"">$labelText: <select class=""table-filter"" data-filter-table=""$(ConvertTo-HtmlEncoded $TableId)"" data-filter-col=""$colIndex""><option value="""">All</option>$($optionTags -join '')</select></label>"
+        }
+
+        if ($filterControls) {
+            $table = "<div class=""table-filters"">$($filterControls -join ' ')</div>`n$table"
+        }
+    }
+
+    return $table
+}
+
+# Renders the "Blocked Group Policies (authoritative)" report section body
+# - the prominent, top-of-report section - for the ParseStatus values that
+# actually warrant one: 'Found' (Windows reported real rows - genuinely
+# strong evidence) and the parse-failure/unknown states (HeadingNotFound/
+# TableNotFound/FileMissing/ParseError/Skipped - this table could not be
+# evaluated at all, which must stay clearly visible so it is never mistaken
+# for "nothing found"). Returns $null for 'EmptyTable' specifically: Windows'
+# own MDMDiagReport.html is not reliable enough at confirming "no conflicts
+# exist" for an empty table to be presented as a prominent, reassuring
+# top-of-report banner - that case instead gets a single small, factual,
+# unstyled footnote elsewhere in the report (see Get-BlockedGpFootnoteHtml),
+# not a section of its own here. New-HtmlReport skips rendering this
+# section's <h2> heading entirely when this function returns $null, so an
+# EmptyTable run does not show an empty/heading-only section either.
+function Get-BlockedGpSectionHtml {
+    param(
+        [Parameter(Mandatory)][object]$BlockedGpResult,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$DisplayRows
+    )
+
+    switch ($BlockedGpResult.ParseStatus) {
+        'Found' {
+            $pathText = ConvertTo-HtmlEncoded $BlockedGpResult.ReportPath
+            $intro = "<p>This table is parsed directly from <code>MdmDiagnosticsTool.exe</code>'s own <code>MDMDiagReport.html</code> (<code>$pathText</code>) - Windows' own authoritative statement of which Group Policies were blocked from applying because MDM had already configured the equivalent policy. This is stronger evidence of a real conflict than any name-matching/heuristic section further down this report.</p>"
+            $table = Convert-ObjectsToHtmlTable -Rows $DisplayRows -Properties @(
+                'BlockedGpEntity','BlockedGpValueName','BlockedValue','MdmUrisBlockingGp'
+            ) -Interactive -TableId 'blocked-gp-table' -StatusColumn 'Status'
+            return "$intro`n$table"
+        }
+        'EmptyTable' {
+            return $null
+        }
+        'Skipped' {
+            return '<div class="note">MDM diagnostics were skipped for this run (<code>-SkipMdmDiagnostics</code>), so <code>MDMDiagReport.html</code> was never generated and this section could not be evaluated. Re-run without <code>-SkipMdmDiagnostics</code> to get this evidence.</div>'
+        }
+        default {
+            $statusText = ConvertTo-HtmlEncoded $BlockedGpResult.ParseStatus
+            $reasonText = ConvertTo-HtmlEncoded $BlockedGpResult.Message
+            return "<div class=""note""><strong>This section could not be parsed (status: $statusText).</strong> $reasonText The absence of rows above must NOT be read as absence of conflicts. Open <code>MDMDiagnostics\MDMDiagReport.html</code> in this evidence package manually and look for its own &quot;Blocked Group Policies&quot; section.</div>"
+        }
+    }
+}
+
+# Renders the small, deliberately plain/unstyled footnote that replaces the
+# old prominent "no blocked policies" banner for ParseStatus 'EmptyTable'.
+# Kept modest and factual on purpose - it reports what Windows' own report
+# said (an empty table), not a claim that no conflict exists - so it uses no
+# green/success styling or checkmark-style treatment, and lives below the
+# Heuristic overlap candidates table rather than occupying the prominent
+# top-of-report slot the 'Found'/failure states still use. Returns '' for
+# every other ParseStatus (nothing to add there).
+function Get-BlockedGpFootnoteHtml {
+    param(
+        [Parameter(Mandatory)][object]$BlockedGpResult
+    )
+
+    if ($BlockedGpResult.ParseStatus -ne 'EmptyTable') { return '' }
+
+    return '<p class="footnote">No other Group Policies were reported as blocked in the Intune MDM diagnostics report.</p>'
 }
 
 # Assembles the final human-readable HTML report from every piece of
@@ -859,17 +1733,48 @@ function New-HtmlReport {
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$MdmRows,
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$VerifiedRows,
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$HeuristicRows,
+        # Result object from Get-BlockedGroupPolicyRows (or the -SkipMdmDiagnostics
+        # 'Skipped' stand-in built in the main script body) - see
+        # Get-BlockedGpSectionHtml for how each ParseStatus renders.
+        [Parameter(Mandatory)][object]$BlockedGpResult,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$BlockedGpDisplayRows,
         [Parameter(Mandatory)][string]$EvidenceFolder
     )
 
     $event881 = @($Events | Where-Object Id -eq 881)
     $eventErrors = @($Events | Where-Object { $_.Level -in @('Error','Critical','Warning') })
 
+    # "Verified overlaps" keeps its original meaning (mapped AND both sides
+    # currently configured) even though $VerifiedRows now contains every
+    # applied GPO setting, not just mapped ones - see Get-VerifiedOverlapRows.
+    # GpoConfigured is trivially true for every row here (the row only exists
+    # because it IS an applied GPO setting), so this reduces to exactly
+    # "mapped and MDM evidence found," the same metric as before the Task 2
+    # change - it stays comparable across report versions.
     $verifiedBoth = @($VerifiedRows | Where-Object { $_.GpoConfigured -and $_.MdmConfigured })
+    $unmappedGpoSettings = @($VerifiedRows | Where-Object { $_.MatchType -eq 'No mapping' })
+
+    # Kept distinct from a bare row count so "0" can never be misread: a
+    # genuinely empty table and a parsing failure (unknown - possibly bad
+    # news) are worded differently here. The EmptyTable wording is
+    # deliberately a plain data point - no "confirmed"/"clean"/"no
+    # conflicts" language - since MDMDiagReport.html is not reliable enough
+    # at confirming the absence of a conflict for that framing to be
+    # warranted; see Get-BlockedGroupPolicyRows / Get-BlockedGpSectionHtml.
+    $blockedGpSummaryValue =
+        switch ($BlockedGpResult.ParseStatus) {
+            'Found'      { "$($BlockedGpResult.Rows.Count) (reported by Windows)" }
+            'EmptyTable' { '0 (reported by Windows)' }
+            'Skipped'    { 'Not collected (-SkipMdmDiagnostics was specified)' }
+            default      { "UNKNOWN - could not parse MDMDiagReport.html (status: $($BlockedGpResult.ParseStatus))" }
+        }
+
     $summaryRows = @(
         [pscustomobject]@{ Metric = 'MDMWinsOverGP'; Value = $ConflictState.Interpretation }
+        [pscustomobject]@{ Metric = 'Blocked Group Policies (authoritative, from Windows)'; Value = $blockedGpSummaryValue }
         [pscustomobject]@{ Metric = 'GPO settings parsed'; Value = $GpoRows.Count }
         [pscustomobject]@{ Metric = 'PolicyManager effective rows'; Value = $MdmRows.Count }
+        [pscustomobject]@{ Metric = 'Applied GPO settings with no known CSP mapping'; Value = $unmappedGpoSettings.Count }
         [pscustomobject]@{ Metric = 'Verified overlaps'; Value = $verifiedBoth.Count }
         [pscustomobject]@{ Metric = 'Heuristic candidates'; Value = $HeuristicRows.Count }
         [pscustomobject]@{ Metric = 'Recent Event 881 records'; Value = $event881.Count }
@@ -877,16 +1782,331 @@ function New-HtmlReport {
         [pscustomobject]@{ Metric = 'Evidence folder'; Value = $EvidenceFolder }
     )
 
+    # CSS custom properties (variables) so light and dark mode are one
+    # stylesheet, not two - $reportScript's toggleTheme()/initTheme() below
+    # only ever flip the data-theme attribute on <html>; every color comes
+    # from these variables. Red/amber/green status shades are deliberately
+    # different (not simply inverted) between the two modes: the light-mode
+    # shades are pale backgrounds with dark, saturated text, which would be
+    # nearly illegible if naively inverted onto a dark background, so the
+    # dark-mode shades use darker, desaturated backgrounds with light,
+    # brighter text instead - both pairs independently chosen for real
+    # contrast, not derived from each other.
     $css = @'
-body { font-family: Segoe UI, Arial, sans-serif; margin: 28px; color: #202124; }
-h1, h2 { color: #1f3a5f; }
+:root {
+  --bg: #ffffff;
+  --fg: #202124;
+  --heading: #1f3a5f;
+  --border: #d0d7de;
+  --th-bg: #eef3f8;
+  --code-bg: #f3f4f6;
+  --note-bg: #fff8dc;
+  --note-border: #b8860b;
+  --good-bg: #eef8ee;
+  --good-border: #2e7d32;
+  --status-red-bg: #fdecea;
+  --status-red-fg: #8a1c1c;
+  --status-amber-bg: #fff4e0;
+  --status-amber-fg: #7a4b00;
+  --status-green-bg: #eaf7ec;
+  --status-green-fg: #1e5c2c;
+  --link: #0b5fff;
+  --control-bg: #f6f8fa;
+}
+
+:root[data-theme="dark"] {
+  --bg: #14181d;
+  --fg: #e6edf3;
+  --heading: #8fb4e6;
+  --border: #3a4048;
+  --th-bg: #232a32;
+  --code-bg: #232a32;
+  --note-bg: #3a3218;
+  --note-border: #d9a441;
+  --good-bg: #163420;
+  --good-border: #4caf50;
+  --status-red-bg: #4a2020;
+  --status-red-fg: #ff9b93;
+  --status-amber-bg: #473512;
+  --status-amber-fg: #ffcf6b;
+  --status-green-bg: #163a22;
+  --status-green-fg: #8fe3a4;
+  --link: #6ea8fe;
+  --control-bg: #1c232b;
+}
+
+/* Respect the OS preference as the initial default only when the user has
+   not made an explicit choice yet (before $reportScript's initTheme() runs
+   and stamps data-theme on <html> from localStorage, or on a browser with
+   scripting disabled). Explicit choices below always win over this. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="dark"]) {
+    --bg: #14181d;
+    --fg: #e6edf3;
+    --heading: #8fb4e6;
+    --border: #3a4048;
+    --th-bg: #232a32;
+    --code-bg: #232a32;
+    --note-bg: #3a3218;
+    --note-border: #d9a441;
+    --good-bg: #163420;
+    --good-border: #4caf50;
+    --status-red-bg: #4a2020;
+    --status-red-fg: #ff9b93;
+    --status-amber-bg: #473512;
+    --status-amber-fg: #ffcf6b;
+    --status-green-bg: #163a22;
+    --status-green-fg: #8fe3a4;
+    --link: #6ea8fe;
+    --control-bg: #1c232b;
+  }
+}
+
+body { font-family: Segoe UI, Arial, sans-serif; margin: 28px; color: var(--fg); background: var(--bg); }
+h1, h2 { color: var(--heading); }
+a { color: var(--link); }
 table { border-collapse: collapse; width: 100%; margin: 12px 0 28px 0; font-size: 12px; }
-th, td { border: 1px solid #d0d7de; padding: 6px 8px; vertical-align: top; text-align: left; }
-th { background: #eef3f8; position: sticky; top: 0; }
-.note { padding: 12px; background: #fff8dc; border-left: 4px solid #b8860b; }
-.good { padding: 12px; background: #eef8ee; border-left: 4px solid #2e7d32; }
-code { background: #f3f4f6; padding: 2px 4px; }
+th, td { border: 1px solid var(--border); padding: 6px 8px; vertical-align: top; text-align: left; }
+th { background: var(--th-bg); position: sticky; top: 0; }
+.note { padding: 12px; background: var(--note-bg); border-left: 4px solid var(--note-border); }
+.good { padding: 12px; background: var(--good-bg); border-left: 4px solid var(--good-border); }
+code { background: var(--code-bg); padding: 2px 4px; }
+
+/* Semantic red/amber/green row coloring (Task 5), applied via classes set
+   in Convert-ObjectsToHtmlTable's -StatusColumn/-LevelColumn, never via
+   inline styles - the classes carry the color so a single edit to these
+   rules (or the CSS variables above) re-colors every table consistently. */
+.status-red   { background: var(--status-red-bg);   color: var(--status-red-fg); }
+.status-amber { background: var(--status-amber-bg); color: var(--status-amber-fg); }
+.status-green { background: var(--status-green-bg); color: var(--status-green-fg); }
+
+/* Whole-section "needs attention" highlight for Heuristic overlap
+   candidates: real-world use has shown these unverified name-similarity
+   candidates frequently turn out to be actual confirmed conflicts, so the
+   section is promoted to a strong amber treatment so it cannot be
+   scrolled past unnoticed - without changing its underlying epistemic
+   status (still "candidate only", see the caveat text inside it). Reuses
+   the exact same --status-amber-bg/--status-amber-fg variables as the
+   per-row status coloring above (never a separate hardcoded color), so it
+   automatically stays legible and correctly toned in both light and dark
+   mode along with everything else that uses that palette. */
+.needs-attention {
+  padding: 16px 20px;
+  margin: 12px 0 28px 0;
+  background: var(--status-amber-bg);
+  border: 2px solid var(--status-amber-fg);
+  border-radius: 6px;
+}
+.needs-attention h2,
+.needs-attention p { color: var(--status-amber-fg); }
+.needs-attention table { margin-bottom: 0; }
+
+/* Deliberately plain/unstyled: the EmptyTable footnote for Blocked Group
+   Policies reports what Windows' own report said (an empty table), not a
+   claim that no conflict exists, so it gets no green/success styling or
+   checkmark-style treatment - just modest, factual body text. */
+.footnote { font-size: 12px; margin: 8px 0 28px 0; }
+
+/* Sortable/filterable table chrome (Task 4). */
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { filter: brightness(0.95); }
+:root[data-theme="dark"] th.sortable:hover { filter: brightness(1.2); }
+.sort-indicator { display: inline-block; width: 1em; }
+.table-filters { margin: 8px 0; display: flex; flex-wrap: wrap; gap: 12px; }
+.filter-label { font-size: 12px; }
+select.table-filter {
+  margin-left: 4px;
+  background: var(--control-bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  padding: 2px 4px;
+}
+
+/* Dark mode toggle button. */
+#theme-toggle {
+  background: var(--control-bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  float: right;
+}
+#theme-toggle:hover { filter: brightness(1.1); }
 '@
+
+    # Inline vanilla JS only - no external libraries or CDN references, so
+    # the report stays a single, fully self-contained file that works
+    # offline and under a strict CSP. This MUST be a single-quoted, non-
+    # interpolating here-string (@'...'@, not @"..."@): the JS below uses
+    # both ${...}-shaped template-literal-style text in comments and plain
+    # $ is never used here, but bracing this way means neither the literal
+    # '{'/'}' characters nor any '$' the script is ever edited to include
+    # can accidentally be parsed as PowerShell subexpressions/variables -
+    # the whole block is captured as inert text and only ever emitted
+    # verbatim into the page below.
+    $reportScript = @'
+(function () {
+  "use strict";
+
+  var THEME_KEY = "mdmwinsovergp-theme";
+
+  // Severity rank map for the Level column's "severity" sort type (Task 4):
+  // explicit rank, not alphabetical, so Critical > Error > Warning as
+  // requested, and anything unrecognized sorts lowest rather than crashing.
+  var severityRank = {
+    "Critical": 4,
+    "Error": 3,
+    "Warning": 2,
+    "Information": 1,
+    "Verbose": 0
+  };
+
+  function applyTheme(theme) {
+    document.documentElement.setAttribute("data-theme", theme);
+    var btn = document.getElementById("theme-toggle");
+    if (btn) {
+      btn.textContent = theme === "dark" ? "Switch to light mode" : "Switch to dark mode";
+    }
+  }
+
+  function initTheme() {
+    var stored = null;
+    try { stored = localStorage.getItem(THEME_KEY); } catch (e) { /* storage disabled/unavailable */ }
+
+    var theme = stored;
+    if (!theme) {
+      var prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+      theme = prefersDark ? "dark" : "light";
+    }
+    applyTheme(theme);
+  }
+
+  function toggleTheme() {
+    var current = document.documentElement.getAttribute("data-theme") || "light";
+    var next = current === "dark" ? "light" : "dark";
+    applyTheme(next);
+    try { localStorage.setItem(THEME_KEY, next); } catch (e) { /* storage disabled/unavailable */ }
+  }
+
+  function getSortValue(row, colIndex, sortType) {
+    var raw = row.getAttribute("data-c" + colIndex) || "";
+    if (sortType === "number") {
+      var n = parseFloat(raw);
+      return isNaN(n) ? -Infinity : n;
+    }
+    if (sortType === "date") {
+      var t = Date.parse(raw);
+      return isNaN(t) ? -Infinity : t;
+    }
+    if (sortType === "severity") {
+      return Object.prototype.hasOwnProperty.call(severityRank, raw) ? severityRank[raw] : -1;
+    }
+    return raw.toLowerCase();
+  }
+
+  function sortTable(table, th, colIndex, sortType) {
+    var tbody = table.tBodies[0];
+    if (!tbody) { return; }
+    var rows = Array.prototype.slice.call(tbody.rows);
+
+    var ascending = th.getAttribute("data-sort-dir") !== "asc";
+
+    var headerRow = table.tHead.rows[0];
+    Array.prototype.forEach.call(headerRow.cells, function (cell) {
+      cell.removeAttribute("data-sort-dir");
+      var indicator = cell.querySelector(".sort-indicator");
+      if (indicator) { indicator.textContent = ""; }
+    });
+    th.setAttribute("data-sort-dir", ascending ? "asc" : "desc");
+    var thIndicator = th.querySelector(".sort-indicator");
+    if (thIndicator) { thIndicator.textContent = ascending ? " ▲" : " ▼"; }
+
+    rows.sort(function (a, b) {
+      var va = getSortValue(a, colIndex, sortType);
+      var vb = getSortValue(b, colIndex, sortType);
+      if (va < vb) { return ascending ? -1 : 1; }
+      if (va > vb) { return ascending ? 1 : -1; }
+      return 0;
+    });
+
+    rows.forEach(function (row) { tbody.appendChild(row); });
+  }
+
+  function applyFilters(tableId) {
+    var table = document.getElementById(tableId);
+    if (!table || !table.tBodies[0]) { return; }
+
+    var selects = document.querySelectorAll('select.table-filter[data-filter-table="' + tableId + '"]');
+    var rows = table.tBodies[0].rows;
+
+    for (var r = 0; r < rows.length; r++) {
+      var visible = true;
+      for (var s = 0; s < selects.length; s++) {
+        var sel = selects[s];
+        var wanted = sel.value;
+        if (!wanted) { continue; }
+        var col = sel.getAttribute("data-filter-col");
+        var cellValue = rows[r].getAttribute("data-c" + col) || "";
+        if (cellValue !== wanted) {
+          visible = false;
+          break;
+        }
+      }
+      rows[r].style.display = visible ? "" : "none";
+    }
+  }
+
+  function init() {
+    initTheme();
+
+    var toggleButton = document.getElementById("theme-toggle");
+    if (toggleButton) {
+      toggleButton.addEventListener("click", toggleTheme);
+    }
+
+    var sortableHeaders = document.querySelectorAll("th.sortable");
+    Array.prototype.forEach.call(sortableHeaders, function (th) {
+      th.addEventListener("click", function () {
+        var table = th.closest("table");
+        if (!table) { return; }
+        var colIndex = parseInt(th.getAttribute("data-col"), 10);
+        var sortType = th.getAttribute("data-sort") || "text";
+        sortTable(table, th, colIndex, sortType);
+      });
+    });
+
+    var filterSelects = document.querySelectorAll("select.table-filter");
+    Array.prototype.forEach.call(filterSelects, function (sel) {
+      sel.addEventListener("change", function () {
+        applyFilters(sel.getAttribute("data-filter-table"));
+      });
+    });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
+})();
+'@
+
+    # Precomputed here (rather than inline in the here-string below) because
+    # the Blocked Group Policies top section is conditional on ParseStatus:
+    # Get-BlockedGpSectionHtml returns $null for 'EmptyTable' specifically,
+    # in which case this whole prominent section - including its <h2> - is
+    # omitted entirely, not just left showing an empty table. See both
+    # functions' header comments for the full rationale.
+    $blockedGpSectionBody = Get-BlockedGpSectionHtml -BlockedGpResult $BlockedGpResult -DisplayRows $BlockedGpDisplayRows
+    $blockedGpTopSection = if ($blockedGpSectionBody) {
+        "<h2>Blocked Group Policies (authoritative &mdash; reported by Windows)</h2>`n$blockedGpSectionBody"
+    }
+    else {
+        ''
+    }
+    $blockedGpFootnote = Get-BlockedGpFootnoteHtml -BlockedGpResult $BlockedGpResult
 
     $html = @"
 <!DOCTYPE html>
@@ -897,6 +2117,7 @@ code { background: #f3f4f6; padding: 2px 4px; }
 <style>$css</style>
 </head>
 <body>
+<button type="button" id="theme-toggle">Switch to dark mode</button>
 <h1>MDMWinsOverGP Validation Report</h1>
 <p>Computer: $(ConvertTo-HtmlEncoded $env:COMPUTERNAME)<br>
 Generated: $(ConvertTo-HtmlEncoded (Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz'))</p>
@@ -911,28 +2132,42 @@ MDMWinsOverGP does not cover every Windows management CSP.
 <h2>Summary</h2>
 $(Convert-ObjectsToHtmlTable -Rows $summaryRows -Properties @('Metric','Value'))
 
+$blockedGpTopSection
+
+<div class="needs-attention">
+<h2>Heuristic overlap candidates</h2>
+<p>These are name-similarity candidates only, not verified mappings - see the "Candidate only. Confirm the Microsoft CSP mapping before treating this as a conflict." status on every row below, which stays exactly true regardless of how this section is styled. This section is highlighted because, in real-world use, these unverified candidates have frequently turned out to correspond to actual confirmed conflicts once manually reviewed - so treat them as high-priority items to check first, not as proof on their own. Sort any column by clicking its header; filter by CspArea or WinningProvider below the table.</p>
+$(Convert-ObjectsToHtmlTable -Rows ($HeuristicRows | Select-Object -First 250) -Properties @(
+    'Confidence','GpoSetting','GpoName','GpoState','CspArea','CspPolicy',
+    'MdmEffectiveValue','WinningProvider','Status'
+) -Interactive -TableId 'heuristic-overlap-table' `
+  -ColumnSortTypes @{ Confidence = 'number' } `
+  -FilterColumns @('CspArea','WinningProvider') -StatusColumn 'Status')
+</div>
+$blockedGpFootnote
+
 <h2>ControlPolicyConflict state</h2>
 $(Convert-ObjectsToHtmlTable -Rows @($ConflictState) -Properties @(
     'RegistryPath','KeyPresent','MDMWinsOverGP',
     'MDMWinsOverGP_ProviderSet','MDMWinsOverGP_WinningProvider','Interpretation'
 ))
 
-<h2>Verified mapping results</h2>
+<h2>Applied GPO settings and CSP mapping status</h2>
+<p>Every GPO setting GPResult reported as applied on this device, left-joined to the optional mapping CSV and to MDM evidence. Most rows are expected to show "No known CSP mapping" - that reflects real Policy CSP coverage, not a collection error. Sort any column by clicking its header; filter by Status or WinningProvider below the table.</p>
 $(Convert-ObjectsToHtmlTable -Rows $VerifiedRows -Properties @(
     'GpoSetting','GpoName','GpoState','CspArea','CspPolicy',
     'MdmEffectiveValue','WinningProvider','Status','Notes'
-) -EmptyMessage 'No mapping CSV was supplied, or no mapping rows were found.')
-
-<h2>Heuristic overlap candidates</h2>
-$(Convert-ObjectsToHtmlTable -Rows ($HeuristicRows | Select-Object -First 250) -Properties @(
-    'Confidence','GpoSetting','GpoName','GpoState','CspArea','CspPolicy',
-    'MdmEffectiveValue','WinningProvider','Status'
-))
+) -EmptyMessage 'No GPO settings were found in GPResult for this device.' `
+  -Interactive -TableId 'applied-gpo-settings-table' `
+  -FilterColumns @('Status','WinningProvider') -StatusColumn 'Status')
 
 <h2>Recent warnings and errors</h2>
+<p>Sortable by TimeCreated (chronological, not text) and Level (by severity rank - Critical > Error > Warning - not alphabetically).</p>
 $(Convert-ObjectsToHtmlTable -Rows ($eventErrors | Select-Object -First 250) -Properties @(
     'TimeCreated','LogName','Id','Level','Message'
-))
+) -Interactive -TableId 'recent-events-table' `
+  -ColumnSortTypes @{ TimeCreated = 'date'; Id = 'number'; Level = 'severity' } `
+  -LevelColumn 'Level')
 
 <h2>Event log configuration</h2>
 $(Convert-ObjectsToHtmlTable -Rows $LogConfiguration -Properties @(
@@ -949,6 +2184,7 @@ $(Convert-ObjectsToHtmlTable -Rows $LogConfiguration -Properties @(
 <li>Use Debug and Admin events to explain timing or application failures, not as sole proof of precedence.</li>
 <li>Move confirmed settings out of GPO targeting when the migration permits it.</li>
 </ol>
+<script>$reportScript</script>
 </body>
 </html>
 "@
@@ -956,8 +2192,261 @@ $(Convert-ObjectsToHtmlTable -Rows $LogConfiguration -Properties @(
     Set-Content -LiteralPath $Path -Value $html -Encoding UTF8
 }
 
-if (-not (Test-IsAdministrator)) {
-    throw 'Run this script from an elevated Windows PowerShell or PowerShell session.'
+# ---------------------------------------------------------------------------
+# -ReplayFromPath support functions.
+#
+# These exist to let someone iterate on the analysis/report side of this
+# toolkit (overlap matching, the Blocked Group Policies parser, the HTML
+# report) repeatedly against the same real device data, without re-running
+# the slow, elevation-requiring live collection every time. Each function
+# below reconstructs exactly the shape its live-collection counterpart
+# produces (Get-RegistryTreeValues, Export-DmEvents,
+# Get-ControlPolicyConflictState) by reading back a CSV that a previous run
+# of this same script already exported, so every downstream function that
+# consumes that shape keeps working completely unchanged.
+# ---------------------------------------------------------------------------
+
+# Validates that $Path looks like a complete evidence folder previously
+# produced by this script, before any work is done - a specific, named list
+# of whatever is missing is thrown rather than silently continuing to
+# produce an empty or misleading report. This list intentionally covers
+# every artifact replay mode actually reads back (see the -ReplayFromPath
+# comment-based help above for what each one feeds); MDMDiagnostics\
+# MDMDiagReport.html is deliberately NOT required here because
+# Get-BlockedGroupPolicyRows already handles a missing report gracefully
+# (ParseStatus 'FileMissing'), exactly the same as a live run where
+# -SkipMdmDiagnostics was used originally.
+function Assert-ReplayFromPathValid {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        throw "-ReplayFromPath '$Path' does not exist or is not a folder."
+    }
+
+    $requiredRelativePaths = @(
+        'GPResult\GPResult.xml'
+        'Reports'
+        'Registry\PolicyManager-AllValues.csv'
+        'Reports\MDMWinsOverGP-State.csv'
+        'Reports\EventLog-Configuration.csv'
+        'Reports\DeviceManagement-Events.csv'
+    )
+
+    $missing = New-Object System.Collections.Generic.List[string]
+    foreach ($relativePath in $requiredRelativePaths) {
+        $fullPath = Join-Path $Path $relativePath
+        if (-not (Test-Path -LiteralPath $fullPath)) {
+            $missing.Add($fullPath)
+        }
+    }
+
+    if ($missing.Count -gt 0) {
+        throw "-ReplayFromPath '$Path' does not look like a complete evidence folder produced by this script - missing: $($missing -join '; '). Point -ReplayFromPath at one of the ""<ComputerName>-<timestamp>"" folders this script itself produces under Data\Evidence (or its unzipped equivalent), not a partial or hand-edited folder."
+    }
+}
+
+# Copies a previous run's raw evidence folder forward into this new run's
+# evidence package, one top-level item at a time, so a single
+# unreadable/locked file cannot abort copying the rest (matches this
+# toolkit's blanket per-item error-handling convention). A missing source
+# folder is logged at WARN and skipped, not fatal - some are legitimately
+# optional (e.g. MDMDiagnostics when the original run used
+# -SkipMdmDiagnostics).
+function Copy-ReplayEvidenceForward {
+    param(
+        [Parameter(Mandatory)][string]$SourceFolder,
+        [Parameter(Mandatory)][string]$DestinationFolder,
+        [Parameter(Mandatory)][string]$Description
+    )
+
+    if (-not (Test-Path -LiteralPath $SourceFolder)) {
+        Write-Log -Level WARN -Message "Replay: '$Description' source folder '$SourceFolder' does not exist; nothing to copy forward for it. The new evidence package will be missing this raw evidence."
+        return
+    }
+
+    New-Item -ItemType Directory -Path $DestinationFolder -Force | Out-Null
+
+    $items = Get-ChildItem -LiteralPath $SourceFolder -Force -ErrorAction SilentlyContinue
+    foreach ($item in $items) {
+        try {
+            Copy-Item -LiteralPath $item.FullName -Destination $DestinationFolder -Recurse -Force -ErrorAction Stop
+        }
+        catch {
+            Write-Log -Level WARN -Message "Replay: could not copy '$($item.FullName)' forward into '$DestinationFolder' while copying '$Description'. $($_.Exception.Message)"
+        }
+    }
+}
+
+# Reads a previously exported Get-RegistryTreeValues CSV (e.g.
+# PolicyManager-AllValues.csv) back into the exact same shape
+# Get-RegistryTreeValues itself produces, so Get-MdmPolicyRows and every
+# other downstream consumer keeps working unchanged. Every property
+# Get-RegistryTreeValues ever wrote was already a plain display string
+# (Source, Scope, RegistryPath, Area, Policy, ValueName, Value via
+# Convert-ValueToText, ValueKind via [string](...)) - none of them were ever
+# a typed .NET value to begin with, so unlike the event log rows below, an
+# Import-Csv round trip here loses nothing that needs to be re-cast.
+function Import-ReplayedRegistryRows {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        Write-Log -Level WARN -Message "Replay: '$Path' was not found; continuing with no PolicyManager registry rows for this replay."
+        return @()
+    }
+
+    $rows = New-Object System.Collections.Generic.List[object]
+    foreach ($row in (Import-Csv -LiteralPath $Path)) {
+        try {
+            $rows.Add([pscustomobject]@{
+                Source       = [string]$row.Source
+                Scope        = [string]$row.Scope
+                RegistryPath = [string]$row.RegistryPath
+                Area         = [string]$row.Area
+                Policy       = [string]$row.Policy
+                ValueName    = [string]$row.ValueName
+                Value        = [string]$row.Value
+                ValueKind    = [string]$row.ValueKind
+            })
+        }
+        catch {
+            Write-Log -Level WARN -Message "Replay: could not reconstruct a PolicyManager registry row from '$Path'. $($_.Exception.Message)"
+        }
+    }
+
+    return $rows.ToArray()
+}
+
+# Reconstructs the Get-ControlPolicyConflictState shape from a previously
+# exported MDMWinsOverGP-State.csv, for -ReplayFromPath. KeyPresent was
+# originally a real [bool]; Import-Csv always hands back the string
+# "True"/"False", so it is re-cast explicitly here (wrapped in try/catch -
+# malformed/hand-edited data must not crash the run) rather than assumed to
+# have survived the round trip. The other properties were always plain
+# strings (or $null, exported as an empty string), so no further re-casting
+# is needed for them.
+function Import-ReplayedConflictState {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $default = [pscustomobject]@{
+        RegistryPath                  = $null
+        KeyPresent                    = $false
+        MDMWinsOverGP                 = $null
+        MDMWinsOverGP_ProviderSet     = $null
+        MDMWinsOverGP_WinningProvider = $null
+        Interpretation                = 'Not detected (replay: MDMWinsOverGP-State.csv was missing, unreadable, or empty).'
+    }
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        Write-Log -Level WARN -Message "Replay: '$Path' was not found; MDMWinsOverGP state will be reported as unknown for this run."
+        return $default
+    }
+
+    $row = $null
+    try {
+        $row = Import-Csv -LiteralPath $Path | Select-Object -First 1
+    }
+    catch {
+        Write-Log -Level WARN -Message "Replay: could not read '$Path'. $($_.Exception.Message)"
+        return $default
+    }
+
+    if (-not $row) {
+        Write-Log -Level WARN -Message "Replay: '$Path' contained no rows; MDMWinsOverGP state will be reported as unknown for this run."
+        return $default
+    }
+
+    $keyPresent = $false
+    try {
+        $keyPresent = [bool]::Parse([string]$row.KeyPresent)
+    }
+    catch {
+        Write-Log -Level WARN -Message "Replay: could not parse KeyPresent value '$($row.KeyPresent)' from '$Path' as a boolean; defaulting to `$false. $($_.Exception.Message)"
+    }
+
+    return [pscustomobject]@{
+        RegistryPath                  = [string]$row.RegistryPath
+        KeyPresent                    = $keyPresent
+        MDMWinsOverGP                 = [string]$row.MDMWinsOverGP
+        MDMWinsOverGP_ProviderSet     = [string]$row.MDMWinsOverGP_ProviderSet
+        MDMWinsOverGP_WinningProvider = [string]$row.MDMWinsOverGP_WinningProvider
+        Interpretation                = [string]$row.Interpretation
+    }
+}
+
+# Reconstructs the Export-DmEvents return shape (Configuration + Events)
+# from a previous run's EventLog-Configuration.csv and
+# DeviceManagement-Events.csv, for -ReplayFromPath. Every property on an
+# Import-Csv row is a string, even ones that were typed before export (see
+# Get-DmLogConfiguration / Export-DmEvents) - TimeCreated in particular is
+# re-cast back to a real [datetime] here (wrapped in try/catch; malformed/
+# hand-edited data must not crash the run) because New-HtmlReport's
+# interactive "date" sort type only produces a stable, locale-independent
+# sort key when the value really is a [datetime] (see the
+# -is [datetime] check in Convert-ObjectsToHtmlTable). Every other property
+# here is only ever displayed as text or compared as a string (Id, Level -
+# see the -eq/-in comparisons on $Events in New-HtmlReport, both of which
+# coerce cleanly against a string), never sorted numerically or used in
+# arithmetic, so it is left as the string Import-Csv already handed back.
+function Import-ReplayedDmEvidence {
+    param([Parameter(Mandatory)][string]$ReplayFromPath)
+
+    $configPath = Join-Path $ReplayFromPath 'Reports\EventLog-Configuration.csv'
+    $eventsPath = Join-Path $ReplayFromPath 'Reports\DeviceManagement-Events.csv'
+
+    $configuration = @()
+    if (Test-Path -LiteralPath $configPath) {
+        $configuration = @(Import-Csv -LiteralPath $configPath)
+    }
+    else {
+        Write-Log -Level WARN -Message "Replay: '$configPath' was not found; continuing with no event log configuration rows for this replay."
+    }
+
+    $events = New-Object System.Collections.Generic.List[object]
+    if (Test-Path -LiteralPath $eventsPath) {
+        foreach ($row in (Import-Csv -LiteralPath $eventsPath)) {
+            $timeCreated = $null
+            if (-not [string]::IsNullOrWhiteSpace($row.TimeCreated)) {
+                try {
+                    $timeCreated = [datetime]::Parse($row.TimeCreated, [System.Globalization.CultureInfo]::CurrentCulture)
+                }
+                catch {
+                    Write-Log -Level WARN -Message "Replay: could not parse TimeCreated value '$($row.TimeCreated)' from '$eventsPath' as a date; leaving it blank for this row. $($_.Exception.Message)"
+                }
+            }
+
+            $events.Add([pscustomobject]@{
+                TimeCreated = $timeCreated
+                LogName     = [string]$row.LogName
+                Id          = [string]$row.Id
+                Level       = [string]$row.Level
+                Provider    = [string]$row.Provider
+                RecordId    = [string]$row.RecordId
+                Message     = [string]$row.Message
+            })
+        }
+    }
+    else {
+        Write-Log -Level WARN -Message "Replay: '$eventsPath' was not found; continuing with no DeviceManagement event rows for this replay."
+    }
+
+    return [pscustomobject]@{
+        Configuration = $configuration
+        Events        = $events.ToArray()
+    }
+}
+
+if ([string]::IsNullOrWhiteSpace($ReplayFromPath)) {
+    if (-not (Test-IsAdministrator)) {
+        throw 'Run this script from an elevated Windows PowerShell or PowerShell session.'
+    }
+}
+else {
+    # Replay mode only ever reads back files a previous run of this script
+    # already produced - it never touches the registry, event logs,
+    # gpresult.exe, gpupdate.exe, or wevtutil.exe - so the elevation
+    # requirement above is relaxed specifically (and only) for this mode.
+    Write-Log -Message "-ReplayFromPath was specified ('$ReplayFromPath'); skipping the elevation requirement for this run since replay mode only reads back previously collected evidence."
+    Assert-ReplayFromPathValid -Path $ReplayFromPath
 }
 
 # Validate optional input up front so a bad path fails fast, before we spend
@@ -966,8 +2455,40 @@ if (-not [string]::IsNullOrWhiteSpace($MappingCsv) -and -not (Test-Path -Literal
     throw "Mapping CSV not found: $MappingCsv"
 }
 
+# -ReplayFromPath no-op parameter warnings: these parameters only ever
+# affect live collection steps that replay mode skips entirely, so rather
+# than silently ignoring them (which would look like they had no effect for
+# no obvious reason), each is called out explicitly here, once, up front.
+if ($ReplayFromPath) {
+    if ($PSBoundParameters.ContainsKey('SinceHours')) {
+        Write-Log -Level WARN -Message '-SinceHours has no effect with -ReplayFromPath: replayed event data comes from the previous run''s own CSV exports as-is, not a new time-windowed collection.'
+    }
+    if ($PSBoundParameters.ContainsKey('EnableDebugLog')) {
+        Write-Log -Level WARN -Message '-EnableDebugLog has no effect with -ReplayFromPath: replay mode never touches the DeviceManagement Debug log.'
+    }
+    if ($PSBoundParameters.ContainsKey('RunGpUpdate')) {
+        Write-Log -Level WARN -Message '-RunGpUpdate has no effect with -ReplayFromPath: replay mode never runs gpupdate.exe.'
+    }
+    if ($PSBoundParameters.ContainsKey('SkipMdmDiagnostics')) {
+        Write-Log -Level WARN -Message '-SkipMdmDiagnostics has no effect with -ReplayFromPath: replay mode never runs MdmDiagnosticsTool.exe live either way - it always re-parses the replayed MDMDiagReport.html instead.'
+    }
+}
+
+# Resolve the effective evidence root per the central-deployment precedence
+# rules documented in the -OutputRoot/-DataRoot comment-based help: explicit
+# -OutputRoot wins outright; else -DataRoot forces "<DataRoot>\Evidence";
+# else the portable "<script folder>\Data\Evidence" is used if writable;
+# else a machine-local ProgramData fallback is used automatically. This is
+# resolved from $PSScriptRoot, never the current working directory or a
+# hardcoded absolute path, so the whole toolkit folder can be copied
+# anywhere - a network share, an Intune package cache, a USB stick - and
+# still work, whether launched interactively or from a scheduled
+# task/RMM agent with an unpredictable working directory.
+$effectiveOutputRoot = Resolve-DataRoot -ScriptRoot $PSScriptRoot -ExplicitPath $OutputRoot `
+    -DataRootOverride $DataRoot -SubFolderName 'Evidence'
+
 $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$outputFolder = Join-Path $OutputRoot "$env:COMPUTERNAME-$timestamp"
+$outputFolder = Join-Path $effectiveOutputRoot "$env:COMPUTERNAME-$timestamp"
 $folders = @{
     Root       = $outputFolder
     GPResult   = Join-Path $outputFolder 'GPResult'
@@ -979,6 +2500,21 @@ $folders = @{
 
 foreach ($folder in $folders.Values) {
     New-Item -ItemType Directory -Path $folder -Force | Out-Null
+}
+
+# Best-effort: also ensure the shared "Data\Input" convention folder exists
+# next to whichever root was chosen above, as a documented place for an
+# administrator to drop a hand-curated -MappingCsv for central deployments.
+# This is purely a documented convenience location - nothing in this script
+# reads from it automatically - so a failure to create it (e.g. the
+# ProgramData fallback path structure not existing yet in some odd way)
+# must never affect the run.
+try {
+    $inputDataFolder = Join-Path (Split-Path -Path $effectiveOutputRoot -Parent) 'Input'
+    New-Item -ItemType Directory -Path $inputDataFolder -Force -ErrorAction Stop | Out-Null
+}
+catch {
+    Write-Log -Level WARN -Message "Could not create the Data\Input convenience folder. This does not affect collection. $($_.Exception.Message)"
 }
 
 # From this point on, Write-Log also appends to Log.txt in the evidence
@@ -1001,70 +2537,118 @@ $debugEnabledByThisRun = $false
 $collectionSucceeded = $false
 $collectionError = $null
 
+# Task 3 (exit-code contract): initialized here, at script scope, so they
+# are always defined - even if a fatal error strikes before a single
+# collection step runs - and can be read after the try/catch/finally below
+# without tripping Set-StrictMode on an undefined variable.
+$script:ExitCode = 0
+$script:ExitCodeMeaning = 'Not yet determined.'
+
+# The pre-existing try/catch/finally below (unchanged in its own logic) is
+# wrapped in ONE more outer try/catch here purely so this script can reach
+# its own explicit `exit <n>` at the very end of the file, after every bit
+# of the existing finally-block cleanup (Debug log restore, transcript
+# stop, COLLECTION-INCOMPLETE marker, ZIP creation, -ResultsShare copy) has
+# already run. The inner catch below still logs the full error (message and
+# position) via Write-Log -Level ERROR - which is colored and also written
+# to Log.txt - and still re-throws exactly as before; this outer catch only
+# stops that re-thrown error from becoming an unhandled, script-terminating
+# exception before this file's own exit-code logic can run.
+try {
 try {
     Write-Log -Message "Collecting MDMWinsOverGP validation evidence from $env:COMPUTERNAME"
     Write-Log -Message "Evidence folder: $outputFolder"
-
-    $initialLogs = @(Get-DmLogConfiguration)
-    $debugConfig = $initialLogs |
-        Where-Object LogName -eq 'Microsoft-Windows-DeviceManagement-Enterprise-Diagnostics-Provider/Debug' |
-        Select-Object -First 1
-
-    if ($debugConfig) {
-        $debugWasEnabled = [bool]$debugConfig.IsEnabled
+    if ($ReplayFromPath) {
+        Write-Log -Message "Replay mode: regenerating reports/analysis from previously collected evidence at '$ReplayFromPath'; no live collection will run."
     }
 
-    if ($EnableDebugLog -and -not $debugWasEnabled) {
-        Write-Log -Message 'Enabling DeviceManagement Debug log...'
-        # Best effort: enabling the Debug channel can fail (access denied, the
-        # channel is already enabled elsewhere, policy). That must not abort the
-        # whole collection, so log the reason and carry on without it.
-        try {
-            Set-DmDebugLogState -Enabled $true
-            $debugEnabledByThisRun = $true
-        }
-        catch {
-            Write-Log -Level WARN -Message "Could not enable the DeviceManagement Debug log; continuing without it. $($_.Exception.Message)"
-        }
-    }
+    if (-not $ReplayFromPath) {
+        $initialLogs = @(Get-DmLogConfiguration)
+        $debugConfig = $initialLogs |
+            Where-Object LogName -eq 'Microsoft-Windows-DeviceManagement-Enterprise-Diagnostics-Provider/Debug' |
+            Select-Object -First 1
 
-    if ($RunGpUpdate) {
-        Write-Log -Message "Running gpupdate /force (timeout ${GpUpdateTimeoutSeconds}s)..."
-        # Best effort: gpupdate is a convenience refresh, not core evidence. If it
-        # hangs or fails it must never take the run down with it.
-        try {
-            Invoke-GpUpdate -Folder $folders.GPResult -TimeoutSeconds $GpUpdateTimeoutSeconds
+        if ($debugConfig) {
+            $debugWasEnabled = [bool]$debugConfig.IsEnabled
         }
-        catch {
-            Write-Log -Level WARN -Message "gpupdate step failed; continuing with collection. $($_.Exception.Message)"
+
+        if ($EnableDebugLog -and -not $debugWasEnabled) {
+            Write-Log -Message 'Enabling DeviceManagement Debug log...'
+            # Best effort: enabling the Debug channel can fail (access denied, the
+            # channel is already enabled elsewhere, policy). That must not abort the
+            # whole collection, so log the reason and carry on without it.
+            try {
+                Set-DmDebugLogState -Enabled $true
+                $debugEnabledByThisRun = $true
+            }
+            catch {
+                Write-Log -Level WARN -Message "Could not enable the DeviceManagement Debug log; continuing without it. $($_.Exception.Message)"
+            }
+        }
+
+        if ($RunGpUpdate) {
+            Write-Log -Message "Running gpupdate /force (timeout ${GpUpdateTimeoutSeconds}s)..."
+            # Best effort: gpupdate is a convenience refresh, not core evidence. If it
+            # hangs or fails it must never take the run down with it.
+            try {
+                Invoke-GpUpdate -Folder $folders.GPResult -TimeoutSeconds $GpUpdateTimeoutSeconds
+            }
+            catch {
+                Write-Log -Level WARN -Message "gpupdate step failed; continuing with collection. $($_.Exception.Message)"
+            }
         }
     }
 
     Write-Log -Message 'Collecting GPResult...'
-    try {
-        $gpFiles = Invoke-GpResultCollection -Folder $folders.GPResult
+    if ($ReplayFromPath) {
+        # Replay: skip gpresult.exe entirely and parse GPO settings from the
+        # replayed GPResult.xml instead, via the exact same parsing function
+        # a live run uses (Get-GpResultPolicyRows is unchanged - this file
+        # never round-trips through CSV, so there is no type-loss concern
+        # here the way there is for the CSV-backed evidence below). The raw
+        # GPResult folder (xml/html/txt/command output) is also copied
+        # forward untouched so this run's own evidence package stays
+        # complete.
+        $replayGpResultFolder = Join-Path $ReplayFromPath 'GPResult'
+        Copy-ReplayEvidenceForward -SourceFolder $replayGpResultFolder -DestinationFolder $folders.GPResult -Description 'GPResult folder'
+        $gpXmlPath = Join-Path $replayGpResultFolder 'GPResult.xml'
     }
-    catch {
-        # gpresult.exe is core evidence, so a failure here is fatal, but wrap it
-        # to make clear in the log which step failed before the run aborts.
-        throw "GPResult collection failed. $($_.Exception.Message)"
+    else {
+        try {
+            $gpFiles = Invoke-GpResultCollection -Folder $folders.GPResult
+        }
+        catch {
+            # gpresult.exe is core evidence, so a failure here is fatal, but wrap it
+            # to make clear in the log which step failed before the run aborts.
+            throw "GPResult collection failed. $($_.Exception.Message)"
+        }
+        $gpXmlPath = $gpFiles.XmlPath
     }
-    $gpoRows = @(Get-GpResultPolicyRows -XmlPath $gpFiles.XmlPath)
+    $gpoRows = @(Get-GpResultPolicyRows -XmlPath $gpXmlPath)
     Write-Log -Message "Parsed $($gpoRows.Count) candidate GPO setting row(s) from GPResult."
     $gpoRows | Export-Csv -LiteralPath (Join-Path $folders.Reports 'GPO-Settings.csv') -NoTypeInformation -Encoding UTF8
 
     Write-Log -Message 'Reading PolicyManager effective stores...'
-    $mdmRegistryRows = @()
-    $mdmRegistryRows += Get-RegistryTreeValues `
-        -Path 'HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device' `
-        -Source MDM -Scope Device
+    if ($ReplayFromPath) {
+        # Replay: skip the live registry walk and read the previous run's
+        # own PolicyManager-AllValues.csv back into the exact same shape
+        # Get-RegistryTreeValues produces, so Get-MdmPolicyRows below keeps
+        # working unchanged.
+        $mdmRegistryRows = @(Import-ReplayedRegistryRows -Path (Join-Path $ReplayFromPath 'Registry\PolicyManager-AllValues.csv'))
+    }
+    else {
+        $mdmRegistryRows = @()
+        $mdmRegistryRows += Get-RegistryTreeValues `
+            -Path 'HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device' `
+            -Source MDM -Scope Device
 
-    if (Test-Path 'Registry::HKEY_USERS') {
-        foreach ($sidKey in Get-ChildItem 'Registry::HKEY_USERS' -ErrorAction SilentlyContinue |
-                 Where-Object { $_.PSChildName -match '^S-1-5-21-' }) {
+        if (Test-Path 'Registry::HKEY_USERS') {
+            foreach ($sidKey in Get-ChildItem 'Registry::HKEY_USERS' -ErrorAction SilentlyContinue |
+                     Where-Object { $_.PSChildName -match '^S-1-5-21-' }) {
 
-            $userPath = "Registry::$($sidKey.Name)\SOFTWARE\Microsoft\PolicyManager\current\user"
-            $mdmRegistryRows += Get-RegistryTreeValues -Path $userPath -Source MDM -Scope "User:$($sidKey.PSChildName)"
+                $userPath = "Registry::$($sidKey.Name)\SOFTWARE\Microsoft\PolicyManager\current\user"
+                $mdmRegistryRows += Get-RegistryTreeValues -Path $userPath -Source MDM -Scope "User:$($sidKey.PSChildName)"
+            }
         }
     }
 
@@ -1080,24 +2664,59 @@ try {
         -NoTypeInformation -Encoding UTF8
 
     Write-Log -Message 'Exporting classic registry policy trees...'
-    $gpoRegistryRows = @()
-    $gpoRegistryRows += Get-RegistryTreeValues `
-        -Path 'HKLM:\SOFTWARE\Policies' -Source GPORegistry -Scope Device
-    $gpoRegistryRows += Get-RegistryTreeValues `
-        -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies' `
-        -Source GPORegistry -Scope Device
-    $gpoRegistryRows |
-        Export-Csv -LiteralPath (Join-Path $folders.Registry 'ClassicPolicyRegistry.csv') `
-        -NoTypeInformation -Encoding UTF8
+    if ($ReplayFromPath) {
+        # Replay: this snapshot is not used anywhere in overlap analysis
+        # (verified true for the current script - $gpoRegistryRows below is
+        # only ever exported, never read again), so it is simply copied
+        # forward from the replayed evidence rather than re-parsed.
+        $sourceClassicCsv = Join-Path $ReplayFromPath 'Registry\ClassicPolicyRegistry.csv'
+        $destClassicCsv = Join-Path $folders.Registry 'ClassicPolicyRegistry.csv'
+        if (Test-Path -LiteralPath $sourceClassicCsv) {
+            try {
+                Copy-Item -LiteralPath $sourceClassicCsv -Destination $destClassicCsv -Force -ErrorAction Stop
+            }
+            catch {
+                Write-Log -Level WARN -Message "Replay: could not copy '$sourceClassicCsv' forward. $($_.Exception.Message)"
+            }
+        }
+        else {
+            Write-Log -Level WARN -Message "Replay: '$sourceClassicCsv' was not found in the replayed evidence; this run's evidence package will not include a classic GPO registry snapshot."
+        }
+    }
+    else {
+        $gpoRegistryRows = @()
+        $gpoRegistryRows += Get-RegistryTreeValues `
+            -Path 'HKLM:\SOFTWARE\Policies' -Source GPORegistry -Scope Device
+        $gpoRegistryRows += Get-RegistryTreeValues `
+            -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies' `
+            -Source GPORegistry -Scope Device
+        $gpoRegistryRows |
+            Export-Csv -LiteralPath (Join-Path $folders.Registry 'ClassicPolicyRegistry.csv') `
+            -NoTypeInformation -Encoding UTF8
+    }
 
     Write-Log -Message 'Reading MDMWinsOverGP state...'
-    $conflictState = Get-ControlPolicyConflictState
+    if ($ReplayFromPath) {
+        $conflictState = Import-ReplayedConflictState -Path (Join-Path $ReplayFromPath 'Reports\MDMWinsOverGP-State.csv')
+    }
+    else {
+        $conflictState = Get-ControlPolicyConflictState
+    }
     Write-Log -Message "MDMWinsOverGP interpretation: $($conflictState.Interpretation)"
     $conflictState |
         Export-Csv -LiteralPath (Join-Path $folders.Reports 'MDMWinsOverGP-State.csv') `
         -NoTypeInformation -Encoding UTF8
 
-    if (-not $SkipMdmDiagnostics) {
+    if ($ReplayFromPath) {
+        # Replay: MdmDiagnosticsTool.exe is never run live in replay mode
+        # (regardless of -SkipMdmDiagnostics, which is a no-op here - see
+        # the WARN logged up front). Instead, copy the previous run's whole
+        # MDMDiagnostics folder forward so MDMDiagReport.html is available
+        # both as raw evidence and for the Blocked Group Policies re-parse
+        # below.
+        Copy-ReplayEvidenceForward -SourceFolder (Join-Path $ReplayFromPath 'MDMDiagnostics') -DestinationFolder $folders.MDM -Description 'MDMDiagnostics folder'
+    }
+    elseif (-not $SkipMdmDiagnostics) {
         Write-Log -Message 'Running MdmDiagnosticsTool.exe...'
         $mdmTool = Join-Path $env:SystemRoot 'System32\MdmDiagnosticsTool.exe'
         if (Test-Path -LiteralPath $mdmTool) {
@@ -1116,10 +2735,82 @@ try {
         }
     }
 
+    # Task 1: "Blocked Group Policies" is Microsoft's own authoritative
+    # statement (from MdmDiagnosticsTool.exe's MDMDiagReport.html) of which
+    # GPOs were actually blocked because MDM had configured the equivalent
+    # policy - the strongest conflict evidence this toolkit can surface, so
+    # it is parsed unconditionally whenever a report exists to parse.
+    # -SkipMdmDiagnostics means MDMDiagReport.html was never generated at
+    # all this run, so this is stated explicitly (ParseStatus 'Skipped')
+    # rather than searching a folder we already know cannot have the file,
+    # and rather than ever reporting a misleading "0".
+    Write-Log -Message "Parsing the 'Blocked Group Policies' table from MDMDiagReport.html..."
+    if ($ReplayFromPath) {
+        # Replay deliberately does NOT reuse the previous run's exported
+        # Blocked-GroupPolicies.csv - it re-runs this parser live against
+        # the replayed MDMDiagReport.html itself, so someone iterating on
+        # the parser can test changes against the same real report
+        # repeatedly instead of a stale, already-parsed CSV.
+        Write-Log -Message "Replay mode: re-parsing the 'Blocked Group Policies' table from the replayed MDMDiagReport.html under '$ReplayFromPath' (not the previous run's exported Blocked-GroupPolicies.csv)."
+        $blockedGpResult = Get-BlockedGroupPolicyRows -MdmDiagnosticsFolder (Join-Path $ReplayFromPath 'MDMDiagnostics')
+    }
+    elseif ($SkipMdmDiagnostics) {
+        $blockedGpResult = [pscustomobject]@{
+            ParseStatus = 'Skipped'
+            ReportPath  = $null
+            Rows        = @()
+            Message     = 'MDM diagnostics were skipped via -SkipMdmDiagnostics; MDMDiagReport.html was never generated, so the Blocked Group Policies table could not be evaluated for this run.'
+        }
+    }
+    else {
+        $blockedGpResult = Get-BlockedGroupPolicyRows -MdmDiagnosticsFolder $folders.MDM
+    }
+
+    switch ($blockedGpResult.ParseStatus) {
+        'Found'      { Write-Log -Message $blockedGpResult.Message }
+        'EmptyTable' { Write-Log -Message $blockedGpResult.Message }
+        'Skipped'    { Write-Log -Message $blockedGpResult.Message }
+        default      { Write-Log -Level WARN -Message $blockedGpResult.Message }
+    }
+
+    $blockedGpResult.Rows |
+        Export-Csv -LiteralPath (Join-Path $folders.Reports 'Blocked-GroupPolicies.csv') `
+        -NoTypeInformation -Encoding UTF8
+
+    # A separate display-only projection for the HTML report: adds a
+    # synthetic Status text that Get-StatusCssClass's existing 'Confirmed
+    # overlap' substring match colors red (these are Windows-confirmed
+    # conflicts, the strongest evidence in the report), without adding that
+    # extra column to the CSV export above.
+    $blockedGpDisplayRows = @(
+        $blockedGpResult.Rows | ForEach-Object {
+            [pscustomobject]@{
+                BlockedGpEntity    = $_.BlockedGpEntity
+                BlockedGpValueName = $_.BlockedGpValueName
+                BlockedValue       = $_.BlockedValue
+                MdmUrisBlockingGp  = $_.MdmUrisBlockingGp
+                Status             = 'Confirmed overlap (blocked by MDM)'
+            }
+        }
+    )
+
     Write-Log -Message 'Exporting DeviceManagement event logs...'
-    $startTime = (Get-Date).AddHours(-$SinceHours)
-    $dmEvidence = Export-DmEvents -Folder $folders.Events -StartTime $startTime
-    Write-Log -Message "Collected $($dmEvidence.Events.Count) DeviceManagement event(s) since $($startTime.ToString('o'))."
+    if ($ReplayFromPath) {
+        # Replay: skip the live wevtutil/Get-WinEvent collection and read
+        # the previous run's own event CSVs back into the same
+        # Configuration/Events shape Export-DmEvents produces (see
+        # Import-ReplayedDmEvidence for the TimeCreated re-cast this
+        # requires). The raw .evtx files under Events\ are copied forward
+        # separately so this run's evidence package still includes them.
+        $dmEvidence = Import-ReplayedDmEvidence -ReplayFromPath $ReplayFromPath
+        Write-Log -Message "Read back $($dmEvidence.Events.Count) previously collected DeviceManagement event(s) from the replayed evidence."
+        Copy-ReplayEvidenceForward -SourceFolder (Join-Path $ReplayFromPath 'Events') -DestinationFolder $folders.Events -Description 'Events (.evtx) folder'
+    }
+    else {
+        $startTime = (Get-Date).AddHours(-$SinceHours)
+        $dmEvidence = Export-DmEvents -Folder $folders.Events -StartTime $startTime
+        Write-Log -Message "Collected $($dmEvidence.Events.Count) DeviceManagement event(s) since $($startTime.ToString('o'))."
+    }
     $dmEvidence.Configuration |
         Export-Csv -LiteralPath (Join-Path $folders.Reports 'EventLog-Configuration.csv') `
         -NoTypeInformation -Encoding UTF8
@@ -1132,7 +2823,70 @@ try {
         Export-Csv -LiteralPath (Join-Path $folders.Reports 'Event-881.csv') `
         -NoTypeInformation -Encoding UTF8
 
-    $mappings = @(Import-VerifiedMappings -Path $MappingCsv)
+    # -GenerateMappings: auto-generate a mapping CSV via Build-PolicyMappings.ps1
+    # and use it for this run, UNLESS the caller also supplied an explicit
+    # -MappingCsv (which always wins - logged clearly either way). This must
+    # run after GPO-Settings.csv is written (a few lines above, during
+    # GPResult collection) since the generator filters its output to exactly
+    # the GPO settings this run observed; that ordering is verified here by
+    # construction, not by convention. The entire step is non-fatal by
+    # design - Invoke-PolicyMappingsGenerator never throws outward, and the
+    # outer try/catch here is belt-and-suspenders on top of that.
+    $effectiveMappingCsv = $MappingCsv
+
+    if ($ReplayFromPath -and [string]::IsNullOrWhiteSpace($MappingCsv)) {
+        # Replay: no explicit -MappingCsv was supplied, so look for a
+        # mapping CSV the replayed run itself auto-generated via
+        # -GenerateMappings and reuse it automatically, so someone
+        # iterating on report/analysis logic does not have to keep
+        # re-supplying the same mapping by hand. The filtered variant is
+        # preferred (it is what Invoke-PolicyMappingsGenerator normally
+        # produces); the unfiltered variant is used only as a fallback.
+        # If -GenerateMappings is ALSO passed for this run, the block below
+        # forces a fresh, live regeneration and overwrites this choice -
+        # this is only ever the starting point, never the final word.
+        $replayFilteredMapping = Join-Path $ReplayFromPath 'Reports\PolicyMappings-Generated-Filtered.csv'
+        $replayUnfilteredMapping = Join-Path $ReplayFromPath 'Reports\PolicyMappings-Generated.csv'
+
+        if (Test-Path -LiteralPath $replayFilteredMapping) {
+            $effectiveMappingCsv = $replayFilteredMapping
+            Write-Log -Message "Replay: reusing the previous run's auto-generated mapping CSV '$replayFilteredMapping' (no -MappingCsv was supplied)."
+        }
+        elseif (Test-Path -LiteralPath $replayUnfilteredMapping) {
+            $effectiveMappingCsv = $replayUnfilteredMapping
+            Write-Log -Message "Replay: reusing the previous run's auto-generated mapping CSV '$replayUnfilteredMapping' (filtered variant not found; no -MappingCsv was supplied)."
+        }
+        else {
+            Write-Log -Message "Replay: no previously auto-generated mapping CSV was found under '$ReplayFromPath\Reports'; continuing without a mapping unless -GenerateMappings produces one below."
+        }
+    }
+
+    if ($GenerateMappings) {
+        if (-not [string]::IsNullOrWhiteSpace($MappingCsv)) {
+            Write-Log -Message "-GenerateMappings was specified, but an explicit -MappingCsv ('$MappingCsv') was also supplied. The explicit -MappingCsv takes precedence for this run; Build-PolicyMappings.ps1 will not be run."
+        }
+        else {
+            Write-Log -Message 'Generating a GPO-to-CSP mapping CSV via Build-PolicyMappings.ps1 (-GenerateMappings was specified)...'
+            try {
+                $gpoSettingsCsvPath = Join-Path $folders.Reports 'GPO-Settings.csv'
+                $generatedMapping = Invoke-PolicyMappingsGenerator -ScriptRoot $PSScriptRoot `
+                    -ReportsFolder $folders.Reports -GpoSettingsCsvPath $gpoSettingsCsvPath
+
+                if ($generatedMapping) {
+                    $effectiveMappingCsv = $generatedMapping
+                    Write-Log -Message "Using the auto-generated mapping CSV for this run: '$effectiveMappingCsv'."
+                }
+                else {
+                    Write-Log -Level WARN -Message 'Build-PolicyMappings.ps1 did not produce a usable mapping CSV. Continuing without a mapping for this run.'
+                }
+            }
+            catch {
+                Write-Log -Level WARN -Message "Mapping generation step failed unexpectedly. Continuing without a mapping for this run. $($_.Exception.Message)"
+            }
+        }
+    }
+
+    $mappings = @(Import-VerifiedMappings -Path $effectiveMappingCsv)
     $verifiedRows = @(Get-VerifiedOverlapRows -Mappings $mappings -GpoRows $gpoRows -MdmRows $mdmRows)
     $heuristicRows = @(Get-HeuristicOverlapRows -GpoRows $gpoRows -MdmRows $mdmRows)
     Write-Log -Message "$($mappings.Count) verified mapping row(s) supplied; $($heuristicRows.Count) heuristic overlap candidate(s) found."
@@ -1168,6 +2922,8 @@ try {
             -MdmRows $mdmRows `
             -VerifiedRows $verifiedRows `
             -HeuristicRows $heuristicRows `
+            -BlockedGpResult $blockedGpResult `
+            -BlockedGpDisplayRows $blockedGpDisplayRows `
             -EvidenceFolder $folders.Root
     }
     catch {
@@ -1182,11 +2938,24 @@ try {
         WindowsVersion      = [Environment]::OSVersion.VersionString
         PowerShellVersion   = $PSVersionTable.PSVersion.ToString()
         SinceHours          = $SinceHours
-        MappingCsv          = $MappingCsv
+        MappingCsvRequested = $MappingCsv
+        MappingCsvEffective = $effectiveMappingCsv
+        GenerateMappings    = [bool]$GenerateMappings
+        DataRoot            = $DataRoot
+        EffectiveOutputRoot = $effectiveOutputRoot
+        ResultsShare        = $ResultsShare
         DebugWasEnabled     = $debugWasEnabled
         DebugEnabledByRun   = $debugEnabledByThisRun
         OutputFolder        = $folders.Root
         HtmlReport          = $reportPath
+        BlockedGroupPoliciesParseStatus = $blockedGpResult.ParseStatus
+        BlockedGroupPoliciesCount       = $blockedGpResult.Rows.Count
+        # Additive-only fields for -ReplayFromPath provenance: existing
+        # consumers of Manifest.json that don't know about these simply
+        # never see them; IsReplay is $false and ReplaySourceFolder is
+        # $null for a normal live run.
+        IsReplay            = [bool]$ReplayFromPath
+        ReplaySourceFolder  = if ($ReplayFromPath) { $ReplayFromPath } else { $null }
         CollectionSucceeded = $true
         CollectionError     = $null
     }
@@ -1252,8 +3021,10 @@ finally {
     if (Test-Path -LiteralPath $outputFolder) {
         $zipSuffix = if ($collectionSucceeded) { '' } else { '-PARTIAL' }
         $zipPath = "$outputFolder$zipSuffix.zip"
+        $zipCreated = $false
         try {
             Compress-Archive -Path (Join-Path $outputFolder '*') -DestinationPath $zipPath -Force
+            $zipCreated = $true
             if ($collectionSucceeded) {
                 Write-Log -Message "Evidence ZIP: $zipPath"
             }
@@ -1264,5 +3035,101 @@ finally {
         catch {
             Write-Log -Level WARN -Message "Could not create evidence ZIP. The evidence folder is still available at $outputFolder. $($_.Exception.Message)"
         }
+
+        # Task 2 (-ResultsShare): best-effort copy of the evidence ZIP to a
+        # central location for fleet-wide deployments. Deliberately placed
+        # here, inside this same finally block, so a "-PARTIAL" ZIP from a
+        # failed run is also uploaded - that partial evidence is still
+        # valuable to a central admin troubleshooting a fleet-wide rollout.
+        # This is fully non-fatal and can NEVER change the run's outcome,
+        # exit code, or remove the local evidence - the local ZIP created
+        # above always remains regardless of whether this copy succeeds.
+        if ($zipCreated -and -not [string]::IsNullOrWhiteSpace($ResultsShare)) {
+            try {
+                # $zipPath's own name already includes the computer name and
+                # a per-run timestamp (from $outputFolder, plus the
+                # "-PARTIAL" suffix above when applicable), so results from
+                # many machines - and many runs on the same machine - land
+                # in -ResultsShare without colliding.
+                $zipFileName = Split-Path -Path $zipPath -Leaf
+                # Join-Path (never string concatenation) so this is correct
+                # for both a UNC path (\\server\share\...) and a local
+                # folder, and -LiteralPath below so the copy itself never
+                # re-interprets the resulting path as a wildcard.
+                $resultsSharePath = Join-Path -Path $ResultsShare -ChildPath $zipFileName
+
+                # Ensure the destination folder exists; -Force makes this a
+                # no-op if it already does. Running as SYSTEM (the normal
+                # case for a centrally deployed scheduled task/RMM push)
+                # requires the machine account to have write access to
+                # -ResultsShare - see README.md's "Central result
+                # collection" section.
+                New-Item -ItemType Directory -Path $ResultsShare -Force -ErrorAction Stop | Out-Null
+                Copy-Item -LiteralPath $zipPath -Destination $resultsSharePath -Force -ErrorAction Stop
+                Write-Log -Message "Copied evidence ZIP to the central results share: $resultsSharePath"
+            }
+            catch {
+                Write-Log -Level WARN -Message "Could not copy the evidence ZIP to -ResultsShare '$ResultsShare'. The local evidence ZIP at '$zipPath' is unaffected and remains the authoritative copy. Common causes: the share is unreachable, the running account (often SYSTEM for a centrally deployed run) lacks write permission, or the destination disk is full. $($_.Exception.Message)"
+            }
+        }
     }
 }
+}
+catch {
+    # Outer catch for the exit-code contract only - see the comment above
+    # the outer `try {` for why this exists. The inner catch already logged
+    # the full error (message, level ERROR, colored, plus Log.txt) and
+    # already re-threw, so the error has already been surfaced to the user
+    # before this ever runs.
+    $script:ExitCode = 1
+    $script:ExitCodeMeaning = "Fatal error - collection did not complete. $($_.Exception.Message)"
+}
+
+# Task 3: deterministic exit-code contract for Intune/RMM callers (see the
+# .NOTES section of this script's comment-based help, and README.md's
+# "Exit codes" section, for the full documented contract). Only computed
+# here when the outer catch above did not already set a fatal (1) code -
+# every variable referenced below ($blockedGpResult, $verifiedRows) is
+# guaranteed to be assigned whenever that is true, because reaching this
+# point without a fatal error means every collection step that assigns them
+# already ran to completion.
+if ($script:ExitCode -ne 1) {
+    $blockedCount = 0
+    if ($blockedGpResult -and $blockedGpResult.Rows) {
+        $blockedCount = @($blockedGpResult.Rows).Count
+    }
+
+    $confirmedOverlapCount = 0
+    if ($verifiedRows) {
+        $confirmedOverlapCount = @($verifiedRows | Where-Object { $_.GpoConfigured -and $_.MdmConfigured }).Count
+    }
+
+    $conflictsDetected = ($blockedCount -gt 0) -or ($confirmedOverlapCount -gt 0)
+    # -SkipMdmDiagnostics only ever contributes to "degraded" when it was
+    # actually honored (a live run): in replay mode it is a documented
+    # no-op (see the WARN logged up front if both are passed), and
+    # MDMDiagReport.html is always re-parsed live from the replayed
+    # evidence regardless of this switch's value - so letting a leftover
+    # $true here still force a "degraded" exit code would directly
+    # contradict that "no effect" claim. $blockedGpResult.ParseStatus
+    # already reflects the real outcome of that re-parse either way.
+    $evidenceDegraded = ([bool]$SkipMdmDiagnostics -and -not $ReplayFromPath) -or
+        (-not $blockedGpResult) -or
+        ($blockedGpResult.ParseStatus -notin @('Found', 'EmptyTable'))
+
+    if ($conflictsDetected) {
+        $script:ExitCode = 2
+        $script:ExitCodeMeaning = "Completed successfully; blocked GPOs/confirmed overlaps WERE detected ($blockedCount authoritative blocked GPO row(s), $confirmedOverlapCount confirmed overlap(s)). This is an actionable finding, not a failure."
+    }
+    elseif ($evidenceDegraded) {
+        $script:ExitCode = 3
+        $script:ExitCodeMeaning = 'Completed, but with degraded/partial evidence (MDM diagnostics were skipped via -SkipMdmDiagnostics, or the Blocked Group Policies table in MDMDiagReport.html could not be parsed). A "0" elsewhere in this run is NOT conclusive - review Log.txt and the HTML report before concluding there is no conflict.'
+    }
+    else {
+        $script:ExitCode = 0
+        $script:ExitCodeMeaning = 'Completed successfully; no blocked GPOs or confirmed overlaps were detected.'
+    }
+}
+
+Write-Log -Message "Exit code: $($script:ExitCode) - $($script:ExitCodeMeaning)"
+exit $script:ExitCode
