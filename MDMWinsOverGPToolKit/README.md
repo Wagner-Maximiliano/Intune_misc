@@ -141,11 +141,27 @@ section is not - it is Windows reporting the outcome directly.
 `Test-MDMWinsOverGP.ps1` parses that table (via `Get-BlockedGroupPolicyRows`)
 and surfaces it:
 - As the first content section of the HTML report, immediately after the
-  Summary and above every other (comparatively weaker) evidence section.
+  Summary and above every other (comparatively weaker) evidence section -
+  **but only when there is something to show or a warning to raise.** When
+  Windows genuinely reported an empty table (`ParseStatus` `EmptyTable`),
+  this prominent section is skipped entirely rather than shown as a
+  reassuring green "all clear" banner: `MDMDiagReport.html` is not reliable
+  enough at confirming the absence of a conflict for an empty table to be
+  presented that way. Instead you get one small, plain, factual line of
+  text - "No other Group Policies were reported as blocked in the Intune
+  MDM diagnostics report." - placed below the Heuristic overlap candidates
+  table (see "Interpretation" below), with no color styling. A genuine
+  parse failure (`HeadingNotFound`/`TableNotFound`/`FileMissing`/
+  `ParseError`) or `Skipped` (from `-SkipMdmDiagnostics`) still gets the
+  full, clearly visible top-of-report warning section - that distinction is
+  the entire point of this design; only the "genuinely empty" case is
+  softened, not the "unknown" case.
 - As `Reports\Blocked-GroupPolicies.csv`.
-- As a Summary metric row and as part of the exit-code contract (see
-  "Exit codes" below) - a non-empty blocked-GPO table always yields exit
-  code `2` regardless of what any other section found.
+- As a Summary metric row (a bare count, e.g. "0 (reported by Windows)" -
+  deliberately not "confirmed"/"clean"/"no conflicts") and as part of the
+  exit-code contract (see "Exit codes" below) - a non-empty blocked-GPO
+  table always yields exit code `2` regardless of what any other section
+  found.
 
 **Why this can't use a real HTML/DOM parser, and what that means for you.**
 `Invoke-WebRequest -UseBasicParsing` does not build a usable DOM for a local
@@ -166,9 +182,11 @@ structure, and it is deliberately defensive about that uncertainty:
 - This is tracked as a distinct `ParseStatus` on every result (`Found`,
   `EmptyTable`, `HeadingNotFound`, `TableNotFound`, `FileMissing`,
   `ParseError`, or `Skipped` when `-SkipMdmDiagnostics` was passed) so "the
-  table was genuinely empty (no conflicts)" and "we failed to parse the
-  table" can never be confused with each other - both the HTML report and
-  Log.txt state which one happened, in plain language.
+  table was genuinely empty" and "we failed to parse the table" can never be
+  confused with each other - both the HTML report and Log.txt state which
+  one happened, in plain language. Neither case is presented as proof there
+  is no conflict: `EmptyTable` gets a modest, unstyled footnote (see above),
+  never a confident "0 conflicts" claim.
 - **If parsing failed, the report shows an explicit warning, not a
   reassuring green "0".** In that situation, absence of rows must NOT be
   read as absence of conflicts - open `MDMDiagnostics\MDMDiagReport.html`
@@ -183,6 +201,14 @@ Interpretation
   with both a mapping and MDM evidence are the strongest signal ("Confirmed
   overlap") and are what the Summary's "Verified overlaps" count reflects.
 - Heuristic candidate: Similar names only. It is not proof of a conflict.
+  That said, the "Heuristic overlap candidates" section sits in a strong
+  orange/amber highlighted box near the top of the report (right after
+  Blocked Group Policies, ahead of "Applied GPO settings"), because
+  real-world use has shown these unverified candidates frequently do turn
+  out to be actual confirmed conflicts once manually reviewed - so they are
+  worth checking closely even though the underlying data is still only a
+  name-similarity guess, not proof. The section is sortable/filterable like
+  the other interactive tables (by Confidence, CspArea, WinningProvider).
 - WinningProvider: Reported only where PolicyManager exposes the related metadata.
 - Event 881: PolicyManager activity. It is not proof that MDM overrode GPO.
 - The HTML report's tables can be sorted by clicking a column header (click
@@ -295,6 +321,76 @@ also copies it there:
 - **UNC-safe.** Implemented with `Join-Path`/`-LiteralPath` throughout
   (never string concatenation), matching this toolkit's existing UNC-path
   conventions - see "Central deployment" above.
+
+## Replaying a previous run (`-ReplayFromPath`)
+
+Collection (`gpresult.exe`, registry walks under `HKLM`, `MdmDiagnosticsTool.exe`,
+`wevtutil`/`Get-WinEvent` event export) is comparatively slow and requires an
+elevated session. Most iteration, though, happens on the *analysis/report*
+side - overlap matching, the Blocked Group Policies parser, the interactive
+HTML report. `-ReplayFromPath` lets you re-run just that side, repeatedly,
+against the same real device data, without re-collecting anything and
+**without needing to be elevated**:
+
+```powershell
+.\Test-MDMWinsOverGP.ps1 -ReplayFromPath 'C:\ProgramData\MDMWinsOverGP\Data\Evidence\CONTOSO-PC01-20260701-120000'
+```
+
+**What it needs.** `-ReplayFromPath` must point at one of this script's own
+`<ComputerName>-<timestamp>` evidence folders (or its unzipped equivalent).
+This is validated up front, before any output folder is created: if
+`GPResult\GPResult.xml`, `Reports\`, `Registry\PolicyManager-AllValues.csv`,
+`Reports\MDMWinsOverGP-State.csv`, `Reports\EventLog-Configuration.csv`, or
+`Reports\DeviceManagement-Events.csv` is missing, the script throws a
+specific, named list of what is missing instead of silently producing an
+empty or misleading report.
+
+**What it skips.** Nothing in replay mode touches the registry, event logs,
+`gpresult.exe`, `gpupdate.exe`, or `wevtutil.exe` - it only reads back files
+a previous run already produced. Because of that, `Test-IsAdministrator` is
+only enforced when *not* replaying. `-SinceHours`, `-EnableDebugLog`,
+`-RunGpUpdate`, and `-SkipMdmDiagnostics` all have no effect in this mode
+(each logs a `WARN` up front if you pass it alongside `-ReplayFromPath`,
+rather than being silently ignored).
+
+**What it does instead of live collection:**
+- GPO settings are parsed from the replayed `GPResult.xml` with the exact
+  same parser a live run uses.
+- MDM PolicyManager rows are read back from the replayed
+  `Registry\PolicyManager-AllValues.csv`.
+- The classic GPO registry snapshot (not used in overlap analysis) is
+  copied forward unparsed.
+- DeviceManagement event data is read back from the replayed
+  `EventLog-Configuration.csv`/`DeviceManagement-Events.csv`.
+- The MDMWinsOverGP/`ControlPolicyConflict` state is read back from the
+  replayed `Reports\MDMWinsOverGP-State.csv`.
+- **The "Blocked Group Policies" table is deliberately NOT read back from
+  the old exported CSV.** It is re-parsed live, every time, from the
+  replayed `MDMDiagnostics\MDMDiagReport.html`, so changes to
+  `Get-BlockedGroupPolicyRows` can be tested against the same real report
+  repeatedly - this is the main reason `-ReplayFromPath` exists.
+- GPResult files, the `MDMDiagnostics` folder, `.evtx` files under
+  `Events\`, and the classic registry CSV are all copied forward
+  untouched, so the new run's evidence folder is still one complete,
+  self-contained package with the same layout as a live run.
+
+**Mapping CSV reuse.** If you don't pass `-MappingCsv`, the script looks in
+`$ReplayFromPath\Reports` for a mapping CSV a previous `-GenerateMappings`
+run already produced (`PolicyMappings-Generated-Filtered.csv`, falling back
+to `PolicyMappings-Generated.csv`) and reuses it automatically, logging
+which file it chose. An explicit `-MappingCsv` always wins. You can still
+pass `-GenerateMappings` alongside `-ReplayFromPath` to force a fresh, live
+mapping regeneration - that step doesn't require elevation either and keeps
+working exactly as it does for a live run.
+
+**Every other run's own outputs.** Every replay still produces a brand-new,
+normal `<ComputerName>-<timestamp>` evidence folder - `-ReplayFromPath` is
+never overwritten or reused as the output location. Overlap analysis, the
+Blocked Group Policies report section, the interactive HTML report (dark
+mode, sorting, filtering), Summary metrics, `Manifest.json` (which
+additionally records `IsReplay` and `ReplaySourceFolder` for provenance),
+`-ResultsShare`, ZIP creation, and the exit-code contract all run exactly as
+they do for a live run, against the replayed/reconstructed data.
 
 ## Exit codes
 
