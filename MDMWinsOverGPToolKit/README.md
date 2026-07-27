@@ -22,6 +22,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 ([Microsoft Learn][1])olicyManager device and user settings.
 
 * ProviderSet and WinningProvider metadata where Windows exposes it.
+* The "Blocked Group Policies" table parsed directly out of `MdmDiagReport.html` - Windows' own authoritative statement of which GPOs it actually blocked because MDM had configured the equivalent policy (see "Blocked Group Policies (authoritative evidence)" below).
 * GPResult in XML, HTML, and text formats.
 * MDM diagnostic reports.
 * DeviceManagement Admin, Operational, and Debug logs.
@@ -110,6 +111,7 @@ Main outputs (written under `Reports\` inside the timestamped evidence
 folder for this run - see "Where data lives" below for where that folder
 itself is created)
 - Reports\MDMWinsOverGP-Validation.html (interactive, sortable/filterable, dark-mode-capable)
+- Reports\Blocked-GroupPolicies.csv (parsed from MDMDiagReport.html - see "Blocked Group Policies (authoritative evidence)" below)
 - Reports\Verified-Overlap-Results.csv
 - Reports\Heuristic-Overlap-Candidates.csv
 - Reports\MDM-EffectivePolicies.csv
@@ -119,8 +121,59 @@ itself is created)
 - Events\*.evtx
 - GPResult\GPResult.html
 - GPResult\GPResult.xml
-- MDMDiagnostics\
-- A ZIP containing the full evidence package
+- MDMDiagnostics\ (including MdmDiagnosticsTool.exe's own MDMDiagReport.html)
+- A ZIP containing the full evidence package, optionally also copied to `-ResultsShare` (see below)
+
+## Blocked Group Policies (authoritative evidence)
+
+`MdmDiagnosticsTool.exe` (run automatically unless `-SkipMdmDiagnostics` is
+passed) writes `MDMDiagReport.html` into the evidence package's
+`MDMDiagnostics\` folder. That report has its own section titled **"Blocked
+Group Policies"**, subtitled "Group Policies that were blocked from GP
+Engine because MDM has configured the equivalent policy" - this is
+**Microsoft's own statement, from Windows itself, of which GPOs were
+actually blocked** because MDMWinsOverGP took effect. It is categorically
+stronger evidence than anything else in this report: every other section
+(verified mappings, heuristic name-matching, Event 881, WinningProvider) is
+either an inference this toolkit makes or supplementary context: this
+section is not - it is Windows reporting the outcome directly.
+
+`Test-MDMWinsOverGP.ps1` parses that table (via `Get-BlockedGroupPolicyRows`)
+and surfaces it:
+- As the first content section of the HTML report, immediately after the
+  Summary and above every other (comparatively weaker) evidence section.
+- As `Reports\Blocked-GroupPolicies.csv`.
+- As a Summary metric row and as part of the exit-code contract (see
+  "Exit codes" below) - a non-empty blocked-GPO table always yields exit
+  code `2` regardless of what any other section found.
+
+**Why this can't use a real HTML/DOM parser, and what that means for you.**
+`Invoke-WebRequest -UseBasicParsing` does not build a usable DOM for a local
+file under Windows PowerShell 5.1, and the alternative - the `HTMLFile` COM
+object - depends on legacy MSHTML/IE components that are not guaranteed to
+be present on a modern Windows 11 device (this toolkit's actual central-
+deployment target). The parser therefore uses careful, narrow, non-greedy,
+explicitly timeout-bounded regular expressions instead. **Microsoft can
+change `MDMDiagReport.html`'s markup at any time without notice**, and this
+parser was written without access to a real sample of that file - it is
+based on the documented heading/subtitle text and an ordinary HTML `<table>`
+structure, and it is deliberately defensive about that uncertainty:
+
+- If the report file is missing, its "Blocked Group Policies" heading text
+  can't be found, no `<table>` follows that heading, or an unexpected error
+  occurs while parsing, the run logs a clear `WARN` explaining exactly which
+  step failed, and **never silently reports zero rows** in that case.
+- This is tracked as a distinct `ParseStatus` on every result (`Found`,
+  `EmptyTable`, `HeadingNotFound`, `TableNotFound`, `FileMissing`,
+  `ParseError`, or `Skipped` when `-SkipMdmDiagnostics` was passed) so "the
+  table was genuinely empty (no conflicts)" and "we failed to parse the
+  table" can never be confused with each other - both the HTML report and
+  Log.txt state which one happened, in plain language.
+- **If parsing failed, the report shows an explicit warning, not a
+  reassuring green "0".** In that situation, absence of rows must NOT be
+  read as absence of conflicts - open `MDMDiagnostics\MDMDiagReport.html`
+  in the evidence package by hand and look for its own "Blocked Group
+  Policies" section yourself.
 
 Interpretation
 - The "Applied GPO settings and CSP mapping status" report section lists
@@ -201,6 +254,123 @@ scheduled task/deployment agent with an unpredictable working directory.
   report's sorting/filtering/dark-mode behavior is 100% inline, vanilla
   JavaScript and CSS - no CDN links, no external files - so the whole
   toolkit works on an isolated/air-gapped machine.
+
+## Central result collection (`-ResultsShare`)
+
+For a fleet-wide deployment, running the collector on every machine is only
+half the job - an administrator also needs the results to actually land
+somewhere central. Pass `-ResultsShare` (a UNC path or any other writable
+folder) and, after the local evidence ZIP is created, `Test-MDMWinsOverGP.ps1`
+also copies it there:
+
+```powershell
+.\Test-MDMWinsOverGP.ps1 -GenerateMappings -ResultsShare '\\fileserver\share\MDMWinsOverGP-Results'
+```
+
+- **Unique, self-describing names.** The ZIP's own file name already
+  includes the computer name and a per-run timestamp
+  (`<ComputerName>-<yyyyMMdd-HHmmss>.zip`, or `...-PARTIAL.zip` for a
+  salvaged failed run), so results from many machines - and repeated runs on
+  the same machine - never collide on the results share.
+- **Fully non-fatal.** The copy is wrapped in its own try/catch: an
+  unreachable share, an access-denied error, or a full destination disk is
+  logged as a `WARN` and never changes the run's outcome or exit code, and
+  never removes or replaces the local evidence. The local ZIP in the
+  evidence folder is always the authoritative copy regardless of whether the
+  central copy succeeds.
+- **Runs even for a partial/failed collection.** The copy step lives in the
+  same `finally` block as ZIP creation itself, so a `-PARTIAL` ZIP from a
+  run that hit a fatal error still gets uploaded - that is genuinely useful
+  diagnostic data for a central admin troubleshooting a fleet-wide rollout,
+  not something to withhold just because the run didn't fully succeed.
+- **Works as SYSTEM.** A centrally deployed run (Intune Win32 app, SCCM,
+  scheduled task, RMM push) normally runs as the `SYSTEM` account, which
+  authenticates to network shares as the machine account
+  (`DOMAIN\ComputerName$`), not as any signed-in user. **The destination
+  share/folder must grant write (Modify) permission to either the specific
+  machine accounts involved, `Domain Computers`, or `Authenticated Users`**
+  - a share that only grants access to user accounts will silently fail
+  this copy (logged as a `WARN`, evidence still collected locally) when run
+  under SYSTEM.
+- **UNC-safe.** Implemented with `Join-Path`/`-LiteralPath` throughout
+  (never string concatenation), matching this toolkit's existing UNC-path
+  conventions - see "Central deployment" above.
+
+## Exit codes
+
+`Test-MDMWinsOverGP.ps1` sets the process exit code (`exit <n>` at the very
+end of the script, after all cleanup - transcript stop, Debug-log restore,
+evidence ZIP, and `-ResultsShare` copy - has already run) to a small,
+documented contract so a deployment tool can tell what happened without
+parsing Log.txt:
+
+| Code | Meaning |
+|---|---|
+| `0` | Completed successfully. No blocked GPOs or confirmed conflicts were detected. |
+| `1` | Fatal error. Collection did not complete - see Log.txt and, if present, COLLECTION-INCOMPLETE.txt in the evidence folder. |
+| `2` | Completed successfully, but blocked GPOs and/or confirmed overlaps **were** detected. This is an actionable finding, not a failure - do not treat it the same as `1`. |
+| `3` | Completed, but with degraded/partial evidence: MDM diagnostics were skipped (`-SkipMdmDiagnostics`), or the "Blocked Group Policies" table in MDMDiagReport.html could not be parsed. A "0" elsewhere in this run is **not conclusive** when this code is returned. |
+
+The chosen exit code and its meaning are always logged at `INFO` as the last
+line written to `Log.txt`, e.g. `Exit code: 2 - Completed successfully;
+blocked GPOs/confirmed overlaps WERE detected (...)`.
+
+**Precedence when more than one condition applies:** a fatal error (`1`)
+always wins. Otherwise, an actionable finding (`2`) is reported even if the
+evidence was also degraded in some other respect, since a real, positively
+detected conflict is more actionable information than a caveat about
+missing evidence; only when nothing was detected does a degraded-evidence
+run report `3` instead of `0` (a clean `0` requires evidence good enough to
+actually support that conclusion).
+
+### Consuming this from an Intune Win32 app
+
+Configure the Win32 app's **install** detection to be satisfied by the
+script simply running (e.g. presence of `Manifest.json` or the evidence
+folder), since this script is a data-collection tool, not something that
+changes device state - exit codes `0`-`3` all represent a *completed* run in
+that sense. If you want Intune's install/detection *status* itself to
+reflect whether a conflict was found, wrap the call and translate the
+script's exit code into whatever your own install script/detection script
+convention expects, e.g.:
+
+```powershell
+& "$PSScriptRoot\Test-MDMWinsOverGP.ps1" -GenerateMappings -ResultsShare '\\fileserver\share\MDMWinsOverGP-Results'
+$scriptExit = $LASTEXITCODE
+# $scriptExit: 0/2/3 = collection completed (2/3 carry extra meaning - see
+# table above); 1 = collection failed. Map to your own Win32 app / RMM
+# convention here, e.g. treat 1 as a genuine install failure and 0/2/3 as
+# success with an informational code recorded elsewhere (Log.txt, your RMM's
+# custom-field/tagging mechanism, etc.).
+exit 0
+```
+
+(A Win32 app's *own* exit code is usually best kept `0`/success once the
+collector has run at all - see above - with the richer 0/1/2/3 signal
+consumed separately, e.g. by a companion detection script or an RMM
+custom-field script that inspects `$LASTEXITCODE` or re-parses
+`Manifest.json`'s `BlockedGroupPoliciesParseStatus`/`BlockedGroupPoliciesCount`
+fields, since most Win32 app "detection" mechanisms are not designed to
+carry a 4-state result.)
+
+### Consuming this from a generic RMM
+
+Most RMM tools (NinjaOne, Datto, Action1, etc.) can run a PowerShell script
+as a monitor/task and read its exit code directly, often exposing it as a
+built-in "script exit code" condition/alert. Point that at
+`Test-MDMWinsOverGP.ps1` directly:
+
+```powershell
+Test-MDMWinsOverGP.ps1 -GenerateMappings -ResultsShare '\\fileserver\share\MDMWinsOverGP-Results'
+exit $LASTEXITCODE
+```
+
+and alert on `1` (fatal - investigate the machine) and, separately, `2`
+(informational/actionable - a real MDM/GPO conflict was found and is worth
+reviewing, but the run itself succeeded) however your RMM's alerting
+supports distinguishing severities. Treat `3` as "re-run or investigate
+when convenient" - it means the run completed but couldn't fully answer the
+question this toolkit exists to answer.
 
 ## Build-PolicyMappings.ps1 (auto-generating the mapping CSV)
 

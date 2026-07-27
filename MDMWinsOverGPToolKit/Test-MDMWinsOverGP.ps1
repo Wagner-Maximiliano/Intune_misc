@@ -120,7 +120,32 @@
     many seconds it is terminated and collection continues. Default 180.
 
 .PARAMETER SkipMdmDiagnostics
-    Skips MdmDiagnosticsTool.exe.
+    Skips MdmDiagnosticsTool.exe. The "Blocked Group Policies" table (see
+    README.md) is parsed from MDMDiagReport.html, a file
+    MdmDiagnosticsTool.exe itself produces, so skipping it also means that
+    table cannot be evaluated for this run - the HTML report and
+    Blocked-GroupPolicies.csv both say so explicitly (ParseStatus
+    'Skipped'), never a misleading "0 blocked policies found".
+
+.PARAMETER ResultsShare
+    Optional. A UNC path or any other writable folder. When supplied, after
+    the local evidence ZIP is created (in the script's own finally block,
+    so this also runs for a partial/failed "-PARTIAL" package - that is
+    still valuable diagnostic data for a central admin), the ZIP is also
+    copied there under its own unique, self-describing name
+    ("<ComputerName>-<timestamp>[-PARTIAL].zip"), so a fleet-wide deployment
+    (Intune Win32 app, SCCM, RMM push) can collect results from many
+    machines into one central location without each machine's package
+    colliding with another's.
+
+    This copy is entirely best-effort and non-fatal: an unreachable share,
+    an access-denied error, or a full disk is logged as a WARN and never
+    changes the run's outcome, exit code, or removes the local evidence -
+    the local ZIP in the evidence folder always remains regardless. When
+    the script runs as SYSTEM (the normal case for a centrally deployed
+    scheduled task/RMM push), the SYSTEM account of every target machine
+    needs write access to -ResultsShare; see README.md's "Central result
+    collection" section for how to grant that.
 
 .EXAMPLE
     .\Test-MDMWinsOverGP.ps1 -EnableDebugLog -RunGpUpdate
@@ -133,6 +158,29 @@
 
 .EXAMPLE
     .\Test-MDMWinsOverGP.ps1 -DataRoot '\\fileserver\share\MDMWinsOverGP' -GenerateMappings
+
+.EXAMPLE
+    .\Test-MDMWinsOverGP.ps1 -GenerateMappings -ResultsShare '\\fileserver\share\MDMWinsOverGP-Results'
+
+.NOTES
+    Exit code contract (for Intune Win32 apps, SCCM, and other RMM/
+    deployment tooling that inspects the process exit code - see README.md's
+    "Exit codes" section for consumption guidance):
+      0 - Completed successfully. No blocked GPOs or confirmed conflicts
+          were detected.
+      1 - Fatal error. Collection did not complete (see Log.txt and, if
+          present, COLLECTION-INCOMPLETE.txt in the evidence folder).
+      2 - Completed successfully, but blocked GPOs and/or confirmed
+          overlaps WERE detected. This is an actionable finding, not a
+          failure.
+      3 - Completed, but with degraded/partial evidence: MDM diagnostics
+          were skipped via -SkipMdmDiagnostics, or the "Blocked Group
+          Policies" table in MDMDiagReport.html could not be parsed. A "0"
+          elsewhere in the report is NOT conclusive when this code is
+          returned - review Log.txt and the HTML report before concluding
+          there is no conflict.
+    The exit code actually chosen for the run, and why, is always logged at
+    INFO as the last line written to Log.txt.
 #>
 
 [CmdletBinding()]
@@ -148,7 +196,8 @@ param(
     [switch]$RunGpUpdate,
     [ValidateRange(30, 3600)]
     [int]$GpUpdateTimeoutSeconds = 180,
-    [switch]$SkipMdmDiagnostics
+    [switch]$SkipMdmDiagnostics,
+    [string]$ResultsShare
 )
 
 Set-StrictMode -Version 2.0
@@ -702,6 +751,225 @@ function Get-GpResultPolicyRows {
 
     return $rows.ToArray() |
         Sort-Object GpoSetting, GpoName, RegistryKey, RegistryValue -Unique
+}
+
+# Decodes the small, fixed set of HTML entities MdmDiagnosticsTool.exe's own
+# generated MDMDiagReport.html actually uses (&amp; &lt; &gt; &quot; &#39;
+# &nbsp;), plus generic numeric entities (&#NNN;) as a catch-all. This is
+# deliberately NOT a general-purpose HTML entity decoder - just enough for
+# this one report - because Get-BlockedGroupPolicyRows below cannot rely on
+# a real DOM/HTML parser (see its header comment for why).
+function ConvertFrom-HtmlEntitiesLite {
+    param([string]$Text)
+
+    if ([string]::IsNullOrEmpty($Text)) { return '' }
+
+    $decoded = $Text
+    $decoded = $decoded -replace '&nbsp;', ' '
+    $decoded = $decoded -replace '&lt;', '<'
+    $decoded = $decoded -replace '&gt;', '>'
+    $decoded = $decoded -replace '&quot;', '"'
+    $decoded = $decoded -replace '&#39;', "'"
+    $decoded = $decoded -replace '&apos;', "'"
+    # Generic decimal numeric entities. Deliberately anchored/bounded (no
+    # unbounded lookaround) so this cannot backtrack badly.
+    $decoded = [System.Text.RegularExpressions.Regex]::Replace(
+        $decoded, '&#(\d{1,7});',
+        { param($m) [string][char][int]$m.Groups[1].Value }
+    )
+    # &amp; must be decoded LAST - decoding it earlier would turn a literal
+    # "&amp;lt;" (an already-escaped "&lt;" in the source data) into "&lt;"
+    # and then wrongly decode that too on a second pass.
+    $decoded = $decoded -replace '&amp;', '&'
+    return $decoded
+}
+
+# Strips HTML tags out of one table cell's inner HTML, decodes entities, and
+# collapses whitespace/newlines (MDMDiagReport.html's generated markup is
+# not reliably single-line) into a single space, leaving clean display text
+# suitable for CSV/HTML output.
+function ConvertFrom-HtmlCellText {
+    param([string]$Html)
+
+    if ([string]::IsNullOrEmpty($Html)) { return '' }
+
+    $noTags = [System.Text.RegularExpressions.Regex]::Replace($Html, '<[^>]*>', ' ')
+    $decoded = ConvertFrom-HtmlEntitiesLite -Text $noTags
+    return ($decoded -replace '\s+', ' ').Trim()
+}
+
+# Locates and parses the "Blocked Group Policies" table from
+# MdmDiagnosticsTool.exe's own MDMDiagReport.html - subtitled "Group
+# Policies that were blocked from GP Engine because MDM has configured the
+# equivalent policy". This is Windows' own authoritative statement of which
+# GPOs were actually blocked in favor of MDM - far stronger evidence than
+# any name-matching or registry inference elsewhere in this toolkit.
+#
+# Why regex/string parsing instead of a DOM parser: Invoke-WebRequest
+# -UseBasicParsing does not produce a usable DOM for a local file under
+# Windows PowerShell 5.1, and the alternative (the HTMLFile COM object)
+# depends on legacy MSHTML/IE components that are not guaranteed present on
+# a modern Windows 11 device - exactly this toolkit's central-deployment
+# target. Parsing is therefore done with narrow, non-greedy, explicitly
+# timeout-bounded [regex] patterns instead, on the assumption that Microsoft
+# can change this report's markup at any time without notice - every step
+# below is written to fail safely (a specific, distinct ParseStatus) rather
+# than to guess.
+#
+# The distinction between "the table was genuinely empty" (ParseStatus
+# 'EmptyTable' - Windows reported zero blocked GPOs, good news) and "we
+# could not parse the table" (HeadingNotFound/TableNotFound/FileMissing/
+# ParseError - unknown, NOT good news) is preserved end to end via
+# ParseStatus specifically so callers (the HTML report, the exit-code logic)
+# never collapse those two very different situations into the same "0".
+function Get-BlockedGroupPolicyRows {
+    param(
+        [Parameter(Mandatory)][string]$MdmDiagnosticsFolder
+    )
+
+    $result = [pscustomobject]@{
+        ParseStatus = 'FileMissing'
+        ReportPath  = $null
+        Rows        = @()
+        Message     = ''
+    }
+
+    if (-not (Test-Path -LiteralPath $MdmDiagnosticsFolder)) {
+        $result.Message = "MDM diagnostics folder '$MdmDiagnosticsFolder' does not exist, so MDMDiagReport.html could not be located."
+        return $result
+    }
+
+    $reportFile = Get-ChildItem -LiteralPath $MdmDiagnosticsFolder -Filter 'MDMDiagReport.html' `
+        -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+
+    if (-not $reportFile) {
+        $result.Message = "MDMDiagReport.html was not found under '$MdmDiagnosticsFolder'. MdmDiagnosticsTool.exe may have failed, or its output layout may have changed."
+        return $result
+    }
+
+    $result.ReportPath = $reportFile.FullName
+
+    try {
+        $raw = Get-Content -LiteralPath $reportFile.FullName -Raw -ErrorAction Stop
+    }
+    catch {
+        $result.ParseStatus = 'ParseError'
+        $result.Message = "Could not read '$($reportFile.FullName)'. $($_.Exception.Message)"
+        return $result
+    }
+
+    try {
+        $regexTimeout = [TimeSpan]::FromSeconds(10)
+
+        # Locate the "Blocked Group Policies" heading text. The report can
+        # wrap it in any tag (h1/h2/div/span/...), so match the text itself
+        # rather than assuming a tag name - but keep the pattern a handful of
+        # literal words with bounded \s+ runs (no unbounded wildcards), so
+        # this cannot backtrack badly even on a multi-megabyte report.
+        $headingRegex = [System.Text.RegularExpressions.Regex]::new(
+            'Blocked\s+Group\s+Policies',
+            [System.Text.RegularExpressions.RegexOptions]::IgnoreCase,
+            $regexTimeout
+        )
+        $headingMatch = $headingRegex.Match($raw)
+
+        if (-not $headingMatch.Success) {
+            $result.ParseStatus = 'HeadingNotFound'
+            $result.Message = "The 'Blocked Group Policies' heading text was not found in '$($reportFile.FullName)'. MDMDiagReport.html's layout may have changed."
+            return $result
+        }
+
+        # Search for the next <table>...</table> ONLY in the text after the
+        # heading (Substring), never the whole document, and non-greedily -
+        # both are deliberate to avoid catastrophic backtracking on a large
+        # file.
+        $afterHeading = $raw.Substring($headingMatch.Index)
+
+        $tableRegex = [System.Text.RegularExpressions.Regex]::new(
+            '<table\b[^>]*>(?<body>.*?)</table>',
+            ([System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor
+             [System.Text.RegularExpressions.RegexOptions]::Singleline),
+            $regexTimeout
+        )
+        $tableMatch = $tableRegex.Match($afterHeading)
+
+        if (-not $tableMatch.Success) {
+            $result.ParseStatus = 'TableNotFound'
+            $result.Message = "The 'Blocked Group Policies' heading was found, but no following <table> could be located in '$($reportFile.FullName)'. MDMDiagReport.html's layout may have changed."
+            return $result
+        }
+
+        $tableHtml = $tableMatch.Groups['body'].Value
+
+        $rowRegex = [System.Text.RegularExpressions.Regex]::new(
+            '<tr\b[^>]*>(?<row>.*?)</tr>',
+            ([System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor
+             [System.Text.RegularExpressions.RegexOptions]::Singleline),
+            $regexTimeout
+        )
+        $cellRegex = [System.Text.RegularExpressions.Regex]::new(
+            '<t[dh]\b[^>]*>(?<cell>.*?)</t[dh]>',
+            ([System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor
+             [System.Text.RegularExpressions.RegexOptions]::Singleline),
+            $regexTimeout
+        )
+
+        $rows = New-Object System.Collections.Generic.List[object]
+        $rowMatches = $rowRegex.Matches($tableHtml)
+
+        foreach ($rowMatch in $rowMatches) {
+            # Per-row try/catch: one malformed row must never abort parsing
+            # of the rest of the table, matching this toolkit's blanket
+            # per-item error-handling convention.
+            try {
+                $rowHtml = $rowMatch.Groups['row'].Value
+                $cellMatches = $cellRegex.Matches($rowHtml)
+                if ($cellMatches.Count -eq 0) { continue }
+
+                $cellTexts = @($cellMatches | ForEach-Object { ConvertFrom-HtmlCellText -Html $_.Groups['cell'].Value })
+
+                # Skip the header row: its cells are normally <th>, but as a
+                # fallback for a report that uses <td> for the header too,
+                # also recognize it by its first cell's text.
+                $isHeaderRow = ($rowHtml -match '<th\b') -or
+                    ($cellTexts.Count -gt 0 -and $cellTexts[0] -match '^Blocked\s+GP\s+Entity$')
+                if ($isHeaderRow) { continue }
+
+                if ($cellTexts.Count -lt 4) {
+                    Write-Log -Level WARN -Message "Skipped a row in the 'Blocked Group Policies' table with fewer than 4 cells ($($cellTexts.Count) found) in '$($reportFile.FullName)'."
+                    continue
+                }
+
+                $rows.Add([pscustomobject]@{
+                    BlockedGpEntity    = $cellTexts[0]
+                    BlockedGpValueName = $cellTexts[1]
+                    BlockedValue       = $cellTexts[2]
+                    MdmUrisBlockingGp  = $cellTexts[3]
+                })
+            }
+            catch {
+                Write-Log -Level WARN -Message "Could not parse a row in the 'Blocked Group Policies' table in '$($reportFile.FullName)'. $($_.Exception.Message)"
+            }
+        }
+
+        $result.Rows = $rows.ToArray()
+
+        if ($result.Rows.Count -eq 0) {
+            $result.ParseStatus = 'EmptyTable'
+            $result.Message = "The 'Blocked Group Policies' table was located in '$($reportFile.FullName)' and contains no data rows - Windows genuinely reported no Group Policies blocked in favor of MDM on this device."
+        }
+        else {
+            $result.ParseStatus = 'Found'
+            $result.Message = "Parsed $($result.Rows.Count) blocked Group Policy row(s) from '$($reportFile.FullName)'."
+        }
+
+        return $result
+    }
+    catch {
+        $result.ParseStatus = 'ParseError'
+        $result.Message = "Unexpected error parsing '$($reportFile.FullName)'. $($_.Exception.Message)"
+        return $result
+    }
 }
 
 # Lowercases, strips common policy-name verb prefixes (allow/enable/...),
@@ -1301,6 +1569,44 @@ function Convert-ObjectsToHtmlTable {
     return $table
 }
 
+# Renders the "Blocked Group Policies (authoritative)" report section body
+# for every ParseStatus Get-BlockedGroupPolicyRows can return. The four
+# "nothing to show" outcomes are rendered very differently ON PURPOSE:
+# collapsing "Windows genuinely reported zero blocked GPOs" (EmptyTable,
+# good news) and "we could not parse the table" (HeadingNotFound/
+# TableNotFound/FileMissing/ParseError, unknown - possibly bad news) into
+# the same "no rows" UI would be actively misleading for this specific
+# section, precisely because this section exists to be the strongest
+# evidence in the whole report.
+function Get-BlockedGpSectionHtml {
+    param(
+        [Parameter(Mandatory)][object]$BlockedGpResult,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$DisplayRows
+    )
+
+    switch ($BlockedGpResult.ParseStatus) {
+        'Found' {
+            $pathText = ConvertTo-HtmlEncoded $BlockedGpResult.ReportPath
+            $intro = "<p>This table is parsed directly from <code>MdmDiagnosticsTool.exe</code>'s own <code>MDMDiagReport.html</code> (<code>$pathText</code>) - Windows' own authoritative statement of which Group Policies were blocked from applying because MDM had already configured the equivalent policy. This is stronger evidence of a real conflict than any name-matching/heuristic section further down this report.</p>"
+            $table = Convert-ObjectsToHtmlTable -Rows $DisplayRows -Properties @(
+                'BlockedGpEntity','BlockedGpValueName','BlockedValue','MdmUrisBlockingGp'
+            ) -Interactive -TableId 'blocked-gp-table' -StatusColumn 'Status'
+            return "$intro`n$table"
+        }
+        'EmptyTable' {
+            return '<div class="good"><strong>No blocked Group Policies were reported.</strong> Windows'' own MDMDiagReport.html reported an empty &quot;Blocked Group Policies&quot; table on this device - i.e. Windows did not record any Group Policy being blocked in favor of an equivalent MDM policy. This does not by itself mean there are no GPO/MDM overlaps at all (see the sections below) - only that Windows did not report one being actively blocked.</div>'
+        }
+        'Skipped' {
+            return '<div class="note">MDM diagnostics were skipped for this run (<code>-SkipMdmDiagnostics</code>), so <code>MDMDiagReport.html</code> was never generated and this section could not be evaluated. Re-run without <code>-SkipMdmDiagnostics</code> to get this evidence.</div>'
+        }
+        default {
+            $statusText = ConvertTo-HtmlEncoded $BlockedGpResult.ParseStatus
+            $reasonText = ConvertTo-HtmlEncoded $BlockedGpResult.Message
+            return "<div class=""note""><strong>This section could not be parsed (status: $statusText).</strong> $reasonText The absence of rows above must NOT be read as absence of conflicts. Open <code>MDMDiagnostics\MDMDiagReport.html</code> in this evidence package manually and look for its own &quot;Blocked Group Policies&quot; section.</div>"
+        }
+    }
+}
+
 # Assembles the final human-readable HTML report from every piece of
 # evidence collected by the main script body, and writes it to $Path.
 function New-HtmlReport {
@@ -1319,6 +1625,11 @@ function New-HtmlReport {
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$MdmRows,
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$VerifiedRows,
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$HeuristicRows,
+        # Result object from Get-BlockedGroupPolicyRows (or the -SkipMdmDiagnostics
+        # 'Skipped' stand-in built in the main script body) - see
+        # Get-BlockedGpSectionHtml for how each ParseStatus renders.
+        [Parameter(Mandatory)][object]$BlockedGpResult,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$BlockedGpDisplayRows,
         [Parameter(Mandatory)][string]$EvidenceFolder
     )
 
@@ -1334,8 +1645,22 @@ function New-HtmlReport {
     # change - it stays comparable across report versions.
     $verifiedBoth = @($VerifiedRows | Where-Object { $_.GpoConfigured -and $_.MdmConfigured })
     $unmappedGpoSettings = @($VerifiedRows | Where-Object { $_.MatchType -eq 'No mapping' })
+
+    # Kept distinct from a bare row count so "0" can never be misread: a
+    # genuinely empty table (good news) and a parsing failure (unknown -
+    # possibly bad news) are worded completely differently here. See
+    # Get-BlockedGroupPolicyRows / Get-BlockedGpSectionHtml.
+    $blockedGpSummaryValue =
+        switch ($BlockedGpResult.ParseStatus) {
+            'Found'      { "$($BlockedGpResult.Rows.Count) (reported by Windows)" }
+            'EmptyTable' { '0 (Windows reported none)' }
+            'Skipped'    { 'Not collected (-SkipMdmDiagnostics was specified)' }
+            default      { "UNKNOWN - could not parse MDMDiagReport.html (status: $($BlockedGpResult.ParseStatus))" }
+        }
+
     $summaryRows = @(
         [pscustomobject]@{ Metric = 'MDMWinsOverGP'; Value = $ConflictState.Interpretation }
+        [pscustomobject]@{ Metric = 'Blocked Group Policies (authoritative, from Windows)'; Value = $blockedGpSummaryValue }
         [pscustomobject]@{ Metric = 'GPO settings parsed'; Value = $GpoRows.Count }
         [pscustomobject]@{ Metric = 'PolicyManager effective rows'; Value = $MdmRows.Count }
         [pscustomobject]@{ Metric = 'Applied GPO settings with no known CSP mapping'; Value = $unmappedGpoSettings.Count }
@@ -1654,6 +1979,9 @@ MDMWinsOverGP does not cover every Windows management CSP.
 <h2>Summary</h2>
 $(Convert-ObjectsToHtmlTable -Rows $summaryRows -Properties @('Metric','Value'))
 
+<h2>Blocked Group Policies (authoritative &mdash; reported by Windows)</h2>
+$(Get-BlockedGpSectionHtml -BlockedGpResult $BlockedGpResult -DisplayRows $BlockedGpDisplayRows)
+
 <h2>ControlPolicyConflict state</h2>
 $(Convert-ObjectsToHtmlTable -Rows @($ConflictState) -Properties @(
     'RegistryPath','KeyPresent','MDMWinsOverGP',
@@ -1779,6 +2107,24 @@ $debugEnabledByThisRun = $false
 $collectionSucceeded = $false
 $collectionError = $null
 
+# Task 3 (exit-code contract): initialized here, at script scope, so they
+# are always defined - even if a fatal error strikes before a single
+# collection step runs - and can be read after the try/catch/finally below
+# without tripping Set-StrictMode on an undefined variable.
+$script:ExitCode = 0
+$script:ExitCodeMeaning = 'Not yet determined.'
+
+# The pre-existing try/catch/finally below (unchanged in its own logic) is
+# wrapped in ONE more outer try/catch here purely so this script can reach
+# its own explicit `exit <n>` at the very end of the file, after every bit
+# of the existing finally-block cleanup (Debug log restore, transcript
+# stop, COLLECTION-INCOMPLETE marker, ZIP creation, -ResultsShare copy) has
+# already run. The inner catch below still logs the full error (message and
+# position) via Write-Log -Level ERROR - which is colored and also written
+# to Log.txt - and still re-throws exactly as before; this outer catch only
+# stops that re-thrown error from becoming an unhandled, script-terminating
+# exception before this file's own exit-code logic can run.
+try {
 try {
     Write-Log -Message "Collecting MDMWinsOverGP validation evidence from $env:COMPUTERNAME"
     Write-Log -Message "Evidence folder: $outputFolder"
@@ -1894,6 +2240,56 @@ try {
         }
     }
 
+    # Task 1: "Blocked Group Policies" is Microsoft's own authoritative
+    # statement (from MdmDiagnosticsTool.exe's MDMDiagReport.html) of which
+    # GPOs were actually blocked because MDM had configured the equivalent
+    # policy - the strongest conflict evidence this toolkit can surface, so
+    # it is parsed unconditionally whenever a report exists to parse.
+    # -SkipMdmDiagnostics means MDMDiagReport.html was never generated at
+    # all this run, so this is stated explicitly (ParseStatus 'Skipped')
+    # rather than searching a folder we already know cannot have the file,
+    # and rather than ever reporting a misleading "0".
+    Write-Log -Message "Parsing the 'Blocked Group Policies' table from MDMDiagReport.html..."
+    if ($SkipMdmDiagnostics) {
+        $blockedGpResult = [pscustomobject]@{
+            ParseStatus = 'Skipped'
+            ReportPath  = $null
+            Rows        = @()
+            Message     = 'MDM diagnostics were skipped via -SkipMdmDiagnostics; MDMDiagReport.html was never generated, so the Blocked Group Policies table could not be evaluated for this run.'
+        }
+    }
+    else {
+        $blockedGpResult = Get-BlockedGroupPolicyRows -MdmDiagnosticsFolder $folders.MDM
+    }
+
+    switch ($blockedGpResult.ParseStatus) {
+        'Found'      { Write-Log -Message $blockedGpResult.Message }
+        'EmptyTable' { Write-Log -Message $blockedGpResult.Message }
+        'Skipped'    { Write-Log -Message $blockedGpResult.Message }
+        default      { Write-Log -Level WARN -Message $blockedGpResult.Message }
+    }
+
+    $blockedGpResult.Rows |
+        Export-Csv -LiteralPath (Join-Path $folders.Reports 'Blocked-GroupPolicies.csv') `
+        -NoTypeInformation -Encoding UTF8
+
+    # A separate display-only projection for the HTML report: adds a
+    # synthetic Status text that Get-StatusCssClass's existing 'Confirmed
+    # overlap' substring match colors red (these are Windows-confirmed
+    # conflicts, the strongest evidence in the report), without adding that
+    # extra column to the CSV export above.
+    $blockedGpDisplayRows = @(
+        $blockedGpResult.Rows | ForEach-Object {
+            [pscustomobject]@{
+                BlockedGpEntity    = $_.BlockedGpEntity
+                BlockedGpValueName = $_.BlockedGpValueName
+                BlockedValue       = $_.BlockedValue
+                MdmUrisBlockingGp  = $_.MdmUrisBlockingGp
+                Status             = 'Confirmed overlap (blocked by MDM)'
+            }
+        }
+    )
+
     Write-Log -Message 'Exporting DeviceManagement event logs...'
     $startTime = (Get-Date).AddHours(-$SinceHours)
     $dmEvidence = Export-DmEvents -Folder $folders.Events -StartTime $startTime
@@ -1982,6 +2378,8 @@ try {
             -MdmRows $mdmRows `
             -VerifiedRows $verifiedRows `
             -HeuristicRows $heuristicRows `
+            -BlockedGpResult $blockedGpResult `
+            -BlockedGpDisplayRows $blockedGpDisplayRows `
             -EvidenceFolder $folders.Root
     }
     catch {
@@ -2001,10 +2399,13 @@ try {
         GenerateMappings    = [bool]$GenerateMappings
         DataRoot            = $DataRoot
         EffectiveOutputRoot = $effectiveOutputRoot
+        ResultsShare        = $ResultsShare
         DebugWasEnabled     = $debugWasEnabled
         DebugEnabledByRun   = $debugEnabledByThisRun
         OutputFolder        = $folders.Root
         HtmlReport          = $reportPath
+        BlockedGroupPoliciesParseStatus = $blockedGpResult.ParseStatus
+        BlockedGroupPoliciesCount       = $blockedGpResult.Rows.Count
         CollectionSucceeded = $true
         CollectionError     = $null
     }
@@ -2070,8 +2471,10 @@ finally {
     if (Test-Path -LiteralPath $outputFolder) {
         $zipSuffix = if ($collectionSucceeded) { '' } else { '-PARTIAL' }
         $zipPath = "$outputFolder$zipSuffix.zip"
+        $zipCreated = $false
         try {
             Compress-Archive -Path (Join-Path $outputFolder '*') -DestinationPath $zipPath -Force
+            $zipCreated = $true
             if ($collectionSucceeded) {
                 Write-Log -Message "Evidence ZIP: $zipPath"
             }
@@ -2082,5 +2485,93 @@ finally {
         catch {
             Write-Log -Level WARN -Message "Could not create evidence ZIP. The evidence folder is still available at $outputFolder. $($_.Exception.Message)"
         }
+
+        # Task 2 (-ResultsShare): best-effort copy of the evidence ZIP to a
+        # central location for fleet-wide deployments. Deliberately placed
+        # here, inside this same finally block, so a "-PARTIAL" ZIP from a
+        # failed run is also uploaded - that partial evidence is still
+        # valuable to a central admin troubleshooting a fleet-wide rollout.
+        # This is fully non-fatal and can NEVER change the run's outcome,
+        # exit code, or remove the local evidence - the local ZIP created
+        # above always remains regardless of whether this copy succeeds.
+        if ($zipCreated -and -not [string]::IsNullOrWhiteSpace($ResultsShare)) {
+            try {
+                # $zipPath's own name already includes the computer name and
+                # a per-run timestamp (from $outputFolder, plus the
+                # "-PARTIAL" suffix above when applicable), so results from
+                # many machines - and many runs on the same machine - land
+                # in -ResultsShare without colliding.
+                $zipFileName = Split-Path -Path $zipPath -Leaf
+                # Join-Path (never string concatenation) so this is correct
+                # for both a UNC path (\\server\share\...) and a local
+                # folder, and -LiteralPath below so the copy itself never
+                # re-interprets the resulting path as a wildcard.
+                $resultsSharePath = Join-Path -Path $ResultsShare -ChildPath $zipFileName
+
+                # Ensure the destination folder exists; -Force makes this a
+                # no-op if it already does. Running as SYSTEM (the normal
+                # case for a centrally deployed scheduled task/RMM push)
+                # requires the machine account to have write access to
+                # -ResultsShare - see README.md's "Central result
+                # collection" section.
+                New-Item -ItemType Directory -Path $ResultsShare -Force -ErrorAction Stop | Out-Null
+                Copy-Item -LiteralPath $zipPath -Destination $resultsSharePath -Force -ErrorAction Stop
+                Write-Log -Message "Copied evidence ZIP to the central results share: $resultsSharePath"
+            }
+            catch {
+                Write-Log -Level WARN -Message "Could not copy the evidence ZIP to -ResultsShare '$ResultsShare'. The local evidence ZIP at '$zipPath' is unaffected and remains the authoritative copy. Common causes: the share is unreachable, the running account (often SYSTEM for a centrally deployed run) lacks write permission, or the destination disk is full. $($_.Exception.Message)"
+            }
+        }
     }
 }
+}
+catch {
+    # Outer catch for the exit-code contract only - see the comment above
+    # the outer `try {` for why this exists. The inner catch already logged
+    # the full error (message, level ERROR, colored, plus Log.txt) and
+    # already re-threw, so the error has already been surfaced to the user
+    # before this ever runs.
+    $script:ExitCode = 1
+    $script:ExitCodeMeaning = "Fatal error - collection did not complete. $($_.Exception.Message)"
+}
+
+# Task 3: deterministic exit-code contract for Intune/RMM callers (see the
+# .NOTES section of this script's comment-based help, and README.md's
+# "Exit codes" section, for the full documented contract). Only computed
+# here when the outer catch above did not already set a fatal (1) code -
+# every variable referenced below ($blockedGpResult, $verifiedRows) is
+# guaranteed to be assigned whenever that is true, because reaching this
+# point without a fatal error means every collection step that assigns them
+# already ran to completion.
+if ($script:ExitCode -ne 1) {
+    $blockedCount = 0
+    if ($blockedGpResult -and $blockedGpResult.Rows) {
+        $blockedCount = @($blockedGpResult.Rows).Count
+    }
+
+    $confirmedOverlapCount = 0
+    if ($verifiedRows) {
+        $confirmedOverlapCount = @($verifiedRows | Where-Object { $_.GpoConfigured -and $_.MdmConfigured }).Count
+    }
+
+    $conflictsDetected = ($blockedCount -gt 0) -or ($confirmedOverlapCount -gt 0)
+    $evidenceDegraded = [bool]$SkipMdmDiagnostics -or
+        (-not $blockedGpResult) -or
+        ($blockedGpResult.ParseStatus -notin @('Found', 'EmptyTable'))
+
+    if ($conflictsDetected) {
+        $script:ExitCode = 2
+        $script:ExitCodeMeaning = "Completed successfully; blocked GPOs/confirmed overlaps WERE detected ($blockedCount authoritative blocked GPO row(s), $confirmedOverlapCount confirmed overlap(s)). This is an actionable finding, not a failure."
+    }
+    elseif ($evidenceDegraded) {
+        $script:ExitCode = 3
+        $script:ExitCodeMeaning = 'Completed, but with degraded/partial evidence (MDM diagnostics were skipped via -SkipMdmDiagnostics, or the Blocked Group Policies table in MDMDiagReport.html could not be parsed). A "0" elsewhere in this run is NOT conclusive - review Log.txt and the HTML report before concluding there is no conflict.'
+    }
+    else {
+        $script:ExitCode = 0
+        $script:ExitCodeMeaning = 'Completed successfully; no blocked GPOs or confirmed overlaps were detected.'
+    }
+}
+
+Write-Log -Message "Exit code: $($script:ExitCode) - $($script:ExitCodeMeaning)"
+exit $script:ExitCode
