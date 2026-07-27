@@ -65,12 +65,15 @@
     '\\msfssoftware\Client\MDMWinOverGPO\Script\Test-MDMWinsOverGP.ps1'.
 
 .PARAMETER Credential
-    Credential Invoke-Command uses to connect to every device. If not
-    supplied, you are prompted once via Get-Credential before any device is
-    contacted. This should be an account with local admin rights on every
-    target device (Test-MDMWinsOverGP.ps1 requires elevation for a live
-    collection run) and, if -ResultsShare is also used, write access to that
-    share as seen from each device - see the double-hop note above.
+    Optional. Credential Invoke-Command uses to connect to every device. If
+    not supplied (the default), Invoke-Command uses the current session's
+    own identity - the normal case when this script is already being run as
+    a domain admin (or similarly privileged) account with local admin
+    rights on every target device (Test-MDMWinsOverGP.ps1 requires elevation
+    for a live collection run) and, if -ResultsShare is also used, write
+    access to that share as seen from each device - see the double-hop note
+    above. Only pass -Credential when you need to connect as an account
+    other than the one already running this script.
 
 .PARAMETER ResultsShare
     Optional. Passed straight through as -ResultsShare to
@@ -303,13 +306,11 @@ if ($deviceNames.Count -eq 0) {
 
 Write-Log -Message "$($deviceNames.Count) unique device(s) loaded from '$DeviceListCsv'."
 
-if (-not $Credential) {
-    Write-Log -Message 'No -Credential supplied; prompting interactively. This credential must have local admin rights on every target device.'
-    $Credential = Get-Credential -Message 'Credential used to connect to every device in the fleet (needs local admin rights on each device)'
-    if (-not $Credential) {
-        Write-Log -Level ERROR -Message 'A credential is required to continue. No credential was supplied.'
-        exit 1
-    }
+if ($Credential) {
+    Write-Log -Message "Connecting as the explicitly supplied credential '$($Credential.UserName)'."
+}
+else {
+    Write-Log -Message "No -Credential supplied; Invoke-Command will use the current session's identity ($([Security.Principal.WindowsIdentity]::GetCurrent().Name)) - this account needs local admin rights on every target device."
 }
 
 # One result row per device, built up across the online check and the
@@ -403,9 +404,23 @@ if ($onlineDevices.Count -gt 0) {
     Write-Log -Message "Starting Invoke-Command against $($onlineDevices.Count) device(s) (ThrottleLimit=$ThrottleLimit)..."
 
     $icmErrors = $null
-    $icmJob = Invoke-Command -ComputerName $onlineDevices -Credential $Credential -ThrottleLimit $ThrottleLimit `
-        -ScriptBlock $remoteScriptBlock -ArgumentList $RemoteScriptPath, $ResultsShare, $RemoteScriptArguments `
-        -AsJob -ErrorVariable icmErrors -ErrorAction SilentlyContinue -JobName 'MDMWinsOverGPFleet'
+    $icmParams = @{
+        ComputerName   = $onlineDevices
+        ThrottleLimit  = $ThrottleLimit
+        ScriptBlock    = $remoteScriptBlock
+        ArgumentList   = @($RemoteScriptPath, $ResultsShare, $RemoteScriptArguments)
+        AsJob          = $true
+        ErrorVariable  = 'icmErrors'
+        ErrorAction    = 'SilentlyContinue'
+        JobName        = 'MDMWinsOverGPFleet'
+    }
+    # Only set -Credential when the caller explicitly supplied one; leaving
+    # it unset makes Invoke-Command use the current session's own identity,
+    # which is the normal case when this script is already running as a
+    # domain admin with rights on every target device.
+    if ($Credential) { $icmParams['Credential'] = $Credential }
+
+    $icmJob = Invoke-Command @icmParams
 
     foreach ($name in $onlineDevices) { $results[$name].StartedAt = Get-Date }
 

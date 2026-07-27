@@ -497,12 +497,16 @@ the fleet script and it is forwarded to `Test-MDMWinsOverGP.ps1` on every
 device unchanged:
 
 ```powershell
+# Run as an already-elevated domain admin account - Invoke-Command uses
+# that session's own identity automatically, no -Credential needed.
 .\Invoke-MDMWinsOverGPFleet.ps1 `
     -DeviceListCsv .\Devices.csv `
-    -Credential (Get-Credential) `
     -ResultsShare '\\msfssoftware\Client\MDMWinOverGPO\Results' `
     -RemoteScriptArguments @('-GenerateMappings')
 ```
+
+Pass `-Credential` only when you need to connect as a *different* account
+than the one already running this script (e.g. `-Credential (Get-Credential)`).
 
 `Devices.csv`:
 
@@ -522,8 +526,10 @@ domain devices have read access to is the normal choice; override with
 
 ### Credentials and the "double-hop" problem
 
-`Invoke-Command` authenticates to each device using `-Credential` (prompted
-interactively if not supplied). This script does nothing further to
+`Invoke-Command` authenticates to each device using `-Credential` if you
+supply one; if you don't, it uses the identity of the account already
+running this script (the recommended default when that account is a domain
+admin with rights on every device). This script does nothing further to
 delegate that credential past the device it's connecting to - no CredSSP,
 no constrained delegation. That matters specifically for `-ResultsShare`:
 once `Test-MDMWinsOverGP.ps1` is running *on* the remote device, its attempt
