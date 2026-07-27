@@ -57,13 +57,33 @@
             with an actual value, in the live MDM PolicyManager evidence?
         If BOTH are true, this is live, on-device proof that the two
         settings are the same enforced thing right now, and the row is
-        promoted to Tier A (device-corroborated) - the strongest possible
-        result this script can produce, because it is not just a name
-        match, it is two independent pieces of evidence that are both
-        currently true on this machine. This can only corroborate the
-        subset of ADMX policies that are actually GPO-configured on THIS
-        device right now; most Tier B rows will simply stay Tier B, which
-        is expected, not a failure.
+        promoted to Tier A (device-corroborated) via the "both-sides-
+        configured" path - the strongest possible result this script can
+        produce, because it is not just a name match, it is two independent
+        pieces of evidence that are both currently true on this machine.
+
+        A SECOND, independent promotion path also exists: when GpoConfigured
+        is false but MdmConfigured is true AND the matched CSP policy's
+        companion _WinningProvider value indicates MDM currently owns it,
+        the row is ALSO promoted to Tier A. This exists because the two
+        signals are not symmetric once MDMWinsOverGP actually does its job:
+        when MDM wins a genuine conflict, Windows blocks the Group Policy
+        engine from writing its registry value at all, so GpoConfigured
+        becomes FALSE precisely because the conflict was resolved in MDM's
+        favor - the "both configured" rule would then never fire for the
+        exact case it exists to detect. A live _WinningProvider=MDM value on
+        an on-device-effective CSP policy is suggestive of a resolved
+        conflict, but on its own it is not proof the GPO side ever targeted
+        this exact setting (that is only proof for the both-sides-configured
+        path, where the GPO registry value is independently observed). Rows
+        promoted via this path are tagged distinctly in Notes and counted
+        separately in the coverage summary so this distinction is never
+        blurred with the stronger both-sides-configured evidence.
+
+        This can only corroborate the subset of ADMX policies that are
+        actually GPO-configured or MDM-winning-and-effective on THIS device
+        right now; most Tier B rows will simply stay Tier B, which is
+        expected, not a failure.
 
         If neither strategy matches at all, fall back to Tier C (weakest):
         normalized/fuzzy token-similarity between the resolved GPO display
@@ -102,6 +122,14 @@
       verified; treat it exactly like the main script treats its own
       heuristic candidates.
 
+    Central deployment:
+      Like Test-MDMWinsOverGP.ps1, every path here resolves from
+      $PSScriptRoot, never a hardcoded absolute path or the current working
+      directory, so this script (and the toolkit folder it ships in) can be
+      copied to a network share, packaged as an Intune Win32 app/SCCM
+      package, or pushed by an RMM tool and just work. See -DataRoot below
+      and README.md's "Central deployment" section.
+
 .PARAMETER PolicyDefinitionsPath
     Folder containing the ADMX files to parse (and the per-language ADML
     subfolder). Defaults to the local Windows policy definitions store.
@@ -111,7 +139,32 @@
     $(string.X) display name references. Defaults to en-US.
 
 .PARAMETER OutputPath
-    Path to write the full generated mapping CSV.
+    Path to write the full generated mapping CSV. Optional - when not
+    supplied, the effective path is chosen automatically (see -DataRoot
+    below): normally "<script folder>\Data\Mappings\PolicyMappings-Generated.csv",
+    or a machine-local fallback under $env:ProgramData when the script
+    folder is not writable. Passing this parameter explicitly always wins
+    over both the default and -DataRoot.
+
+.PARAMETER DataRoot
+    Optional. Forces the base folder under which this script's "Mappings"
+    data subfolder is created, for centrally deployed scenarios (network
+    share, Intune Win32 app, SCCM, RMM push) where an administrator wants an
+    explicit, predictable location rather than the automatic
+    script-folder-or-ProgramData choice. Ignored when -OutputPath is also
+    supplied - -OutputPath always wins.
+
+    When neither -OutputPath nor -DataRoot is supplied, this script first
+    tries "<script folder>\Data\Mappings" (portable: works when the whole
+    toolkit folder is copied anywhere writable, e.g. a USB stick or a
+    writable share - matching Test-MDMWinsOverGP.ps1's own -DataRoot
+    behavior, so both scripts use the same "Data" folder layout side by
+    side). If that folder cannot actually be written to - common when
+    running from a read-only UNC share, an Intune package cache, or a
+    signed/locked deployment folder - it falls back automatically to
+    "$env:ProgramData\MDMWinsOverGP\Data\Mappings", which is normally
+    writable even when running as SYSTEM. Either way, which root was chosen
+    and why is logged at INFO.
 
 .PARAMETER GpoSettingsCsv
     Optional path to a GPO-Settings.csv produced by Test-MDMWinsOverGP.ps1.
@@ -161,6 +214,9 @@
 
 .EXAMPLE
     .\Build-PolicyMappings.ps1 -GpoSettingsCsv 'C:\...\Reports\GPO-Settings.csv' -MinimumConfidence C
+
+.EXAMPLE
+    .\Build-PolicyMappings.ps1 -DataRoot '\\fileserver\share\MDMWinsOverGP'
 #>
 
 [CmdletBinding()]
@@ -169,7 +225,9 @@ param(
 
     [string]$Language = 'en-US',
 
-    [string]$OutputPath = "$env:PUBLIC\Documents\MDMWinsOverGP-Validation\PolicyMappings-Generated.csv",
+    [string]$OutputPath,
+
+    [string]$DataRoot,
 
     [string]$GpoSettingsCsv,
 
@@ -209,6 +267,65 @@ function Write-Log {
         'DEBUG' { Write-Verbose $Message }
         default { Write-Host $line }
     }
+}
+
+# Same writability-probe helper as Test-MDMWinsOverGP.ps1 (kept local for the
+# same standalone-script reason as Normalize-PolicyName below). Best-effort:
+# can we actually create/write in $Path? Used to decide whether the portable
+# "<script folder>\Data\Mappings" location is usable, or whether this is a
+# read-only/locked central deployment (UNC share, Intune package cache,
+# signed folder) that requires falling back to a machine-local writable
+# location. Never throws - a probe failure just means "not writable".
+function Test-PathWritable {
+    param([Parameter(Mandatory)][string]$Path)
+
+    try {
+        New-Item -ItemType Directory -Path $Path -Force -ErrorAction Stop | Out-Null
+        $probeFile = Join-Path $Path ".write-test-$([guid]::NewGuid().ToString('N')).tmp"
+        Set-Content -LiteralPath $probeFile -Value 'probe' -Encoding UTF8 -ErrorAction Stop
+        Remove-Item -LiteralPath $probeFile -Force -ErrorAction SilentlyContinue
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
+# Same central-deployment path-resolution precedence as Test-MDMWinsOverGP.ps1
+# (kept local for the same standalone-script reason as Normalize-PolicyName
+# below), so both scripts share one "Data" folder layout and one fallback
+# story:
+#   1. An explicit path the caller passed wins outright (handled by the
+#      caller before this function is even called, for -OutputPath, since
+#      that is a full file path rather than a directory this function
+#      manages - see the "Main" section below).
+#   2. -DataRoot, if supplied, forces "<DataRoot>\<SubFolderName>".
+#   3. Otherwise, try the portable "<script folder>\Data\<SubFolderName>".
+#   4. If (3) is not writable, fall back to a machine-local location under
+#      $env:ProgramData, which is normally writable even running as SYSTEM.
+function Resolve-DataRoot {
+    param(
+        [Parameter(Mandatory)][string]$ScriptRoot,
+        [string]$DataRootOverride,
+        [Parameter(Mandatory)][string]$SubFolderName
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($DataRootOverride)) {
+        $forced = Join-Path $DataRootOverride $SubFolderName
+        Write-Log -Message "Using -DataRoot override for the '$SubFolderName' data folder: '$forced'."
+        return $forced
+    }
+
+    $portableBase = Join-Path $ScriptRoot 'Data'
+    $portablePath = Join-Path $portableBase $SubFolderName
+    if (Test-PathWritable -Path $portableBase) {
+        Write-Log -Message "Script folder is writable; using the portable data location '$portablePath'."
+        return $portablePath
+    }
+
+    $fallbackPath = Join-Path (Join-Path $env:ProgramData 'MDMWinsOverGP\Data') $SubFolderName
+    Write-Log -Message "Script folder '$ScriptRoot' is not writable (common for a read-only UNC share, an Intune package cache, or a signed/locked deployment folder). Falling back to the machine-local data location '$fallbackPath'."
+    return $fallbackPath
 }
 
 # Same normalization helper as Test-MDMWinsOverGP.ps1 (kept local rather than
@@ -737,6 +854,14 @@ function Get-LiveMdmEvidence {
 # actually configured via classic GPO on THIS device - most rows will not
 # have GpoConfigured = $true, and that is expected, not evidence the name
 # match itself is wrong.
+#
+# NOTE: this function only gathers and returns the two raw signals
+# (GpoConfigured/MdmConfigured/WinningProvider) - it does not decide how they
+# are combined into a promotion. The caller (Get-MappingRows) applies BOTH
+# promotion rules: the strict "both sides configured" rule, and the looser
+# "MDM winning provider" rule that also promotes when GpoConfigured is false
+# but the matched CSP policy is live with WinningProvider indicating MDM -
+# see the header comment (Phase 4) for why the second rule is necessary.
 function Get-DeviceCorroboration {
     param(
         [Parameter(Mandatory)][object]$Admx,
@@ -808,9 +933,18 @@ function Get-DeviceCorroboration {
 # Tier B match is then checked against the live device corroboration
 # evidence (-GpoRegistryEvidence / -MdmEvidence, gathered once up front by
 # the caller and passed in here so this stays a pure join function) via
-# Get-DeviceCorroboration; a match with BOTH GpoConfigured and MdmConfigured
-# true is promoted to Tier A. Only when no name match exists at all does
-# this fall back to Tier C fuzzy matching.
+# Get-DeviceCorroboration. Two independent rules can promote a row to Tier A:
+#   1. "BothConfigured"    - GpoConfigured AND MdmConfigured are both true.
+#   2. "MdmWinningProvider" - GpoConfigured is false, but MdmConfigured is
+#                             true and the CSP policy's _WinningProvider
+#                             value indicates MDM currently owns it (the
+#                             expected signature of MDM having blocked the
+#                             GPO write - see the header comment). This path
+#                             is suggestive of a resolved conflict, not proof
+#                             the GPO ever targeted this setting, and is
+#                             recorded/counted distinctly from rule 1.
+# Only when no name match exists at all does this fall back to Tier C fuzzy
+# matching.
 function Get-MappingRows {
     param(
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$AdmxCatalog,
@@ -875,6 +1009,12 @@ function Get-MappingRows {
         $matchCategory = $null
         $corroborationChecked = $false
         $corroborationPromoted = $false
+        # Which of the two independent Tier A promotion rules fired, if any:
+        # 'BothConfigured' (strict, strongest) or 'MdmWinningProvider' (looser,
+        # suggestive-only - see the header comment for why it exists). Kept
+        # separate from $corroborationPromoted so the coverage summary can
+        # report each path's count independently rather than blur them.
+        $promotionPath = ''
 
         if ($nameMatch) {
             $bestTier = 'B'
@@ -891,23 +1031,45 @@ function Get-MappingRows {
                 $corr = Get-DeviceCorroboration -Admx $admx -Csp $bestCsp -Scope $scope `
                     -GpoRegistryEvidence $GpoRegistryEvidence -MdmEvidence $MdmEvidence
 
+                # Rule 1 (strongest): both sides independently observed as
+                # currently configured on this device.
                 if ($corr.GpoConfigured -and $corr.MdmConfigured) {
                     $bestTier = 'A'
                     $matchCategory = 'DeviceCorroborated'
                     $corroborationPromoted = $true
+                    $promotionPath = 'BothConfigured'
                     $providerNote = if ($corr.WinningProvider) {
                         " WinningProvider='$($corr.WinningProvider)'."
                     }
                     else {
                         ' No _WinningProvider value was present for this policy.'
                     }
-                    $bestNotes = "Tier A (device-corroborated): live registry evidence on THIS device shows both sides of this name match are currently configured - GPO: '$($corr.GpoEvidencePath)' = '$($corr.GpoEvidenceValue)'; MDM: '$($corr.MdmEvidencePath)' = '$($corr.MdmEvidenceValue)'.$providerNote This corroborates the Tier B name match with live, on-device proof; it does not by itself confirm the two settings are semantically identical - still review against Microsoft's Policy CSP documentation."
+                    $bestNotes = "Tier A (device-corroborated, path=BothConfigured): live registry evidence on THIS device shows both sides of this name match are currently configured - GPO: '$($corr.GpoEvidencePath)' = '$($corr.GpoEvidenceValue)'; MDM: '$($corr.MdmEvidencePath)' = '$($corr.MdmEvidenceValue)'.$providerNote This corroborates the Tier B name match with live, on-device proof; it does not by itself confirm the two settings are semantically identical - still review against Microsoft's Policy CSP documentation."
+                }
+                # Rule 2 (looser, suggestive only): the GPO side is absent,
+                # but the CSP side is live and its WinningProvider says MDM
+                # currently owns it. This is the expected registry signature
+                # of MDMWinsOverGP having actually blocked the GP write for a
+                # real conflict - see the header comment for the full
+                # rationale. -match is a case-insensitive substring/regex
+                # test here (no anchors), since observed WinningProvider
+                # values are short provider labels (e.g. "MDM") rather than a
+                # fixed enum this script can rely on being documented anywhere
+                # reachable from this environment.
+                elseif ($corr.MdmConfigured -and $corr.WinningProvider -match 'MDM') {
+                    $bestTier = 'A'
+                    $matchCategory = 'DeviceCorroborated'
+                    $corroborationPromoted = $true
+                    $promotionPath = 'MdmWinningProvider'
+                    $bestNotes = "Tier A (device-corroborated, path=MdmWinningProvider): the classic GPO registry evidence for this ADMX policy's key/valueName is ABSENT (consistent with Group Policy having been blocked from writing it), but the matched CSP policy is live at MDM: '$($corr.MdmEvidencePath)' = '$($corr.MdmEvidenceValue)' with WinningProvider='$($corr.WinningProvider)'. This is SUGGESTIVE of a resolved GPO-vs-MDM conflict, consistent with MDMWinsOverGP having taken effect - it is NOT, by itself, proof that a GPO ever targeted this exact setting (only the BothConfigured path provides that independent GPO-side proof). Treat this tier A row as a strong lead, and still confirm against Microsoft's Policy CSP documentation and, ideally, the GPO's own reporting for this setting."
                 }
                 else {
                     $missing = New-Object System.Collections.Generic.List[string]
                     if (-not $corr.GpoConfigured) { $missing.Add("no currently-configured value found under the classic GPO registry evidence for this ADMX policy's key/valueName") }
                     if (-not $corr.MdmConfigured) { $missing.Add('no currently-effective value found under the live MDM PolicyManager evidence for the matched CSP policy') }
-                    $bestNotes += " Device corroboration attempted but not conclusive: $($missing -join '; '). This does not mean the mapping is wrong - it usually just means this setting is not currently GPO-configured on this device."
+                    elseif ($corr.WinningProvider) { $missing.Add("the matched CSP policy's WinningProvider ('$($corr.WinningProvider)') does not indicate MDM ownership") }
+                    else { $missing.Add('the matched CSP policy has no _WinningProvider value to evaluate for the MdmWinningProvider path') }
+                    $bestNotes += " Device corroboration attempted but not conclusive: $($missing -join '; '). This does not mean the mapping is wrong - it usually just means this setting is not currently GPO-configured (or not currently MDM-winning) on this device."
                 }
             }
         }
@@ -971,6 +1133,7 @@ function Get-MappingRows {
             MatchCategory          = $matchCategory
             CorroborationChecked   = $corroborationChecked
             CorroborationPromoted  = $corroborationPromoted
+            PromotionPath          = $promotionPath
         })
     }
 
@@ -983,6 +1146,26 @@ function Get-MappingRows {
 
 Write-Log -Message 'Building GPO-to-Policy-CSP mapping catalog from local ADMX/ADML and registry data.'
 Write-Log -Message "PolicyDefinitions path: $PolicyDefinitionsPath (Language: $Language)"
+
+# Resolve the effective output path per the central-deployment precedence
+# rules documented in the -OutputPath/-DataRoot comment-based help: an
+# explicit -OutputPath always wins outright (used verbatim, e.g. when
+# Test-MDMWinsOverGP.ps1's -GenerateMappings invokes this script and wants
+# the output inside its own evidence folder - see that script's
+# Invoke-PolicyMappingsGenerator); otherwise -DataRoot forces
+# "<DataRoot>\Mappings"; otherwise the portable "<script folder>\Data\Mappings"
+# is used if writable; otherwise a machine-local ProgramData fallback is used
+# automatically. Resolved from $PSScriptRoot, never the current working
+# directory, so this script works the same way regardless of how or from
+# where it (or its caller) was launched.
+if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
+    $effectiveOutputPath = $OutputPath
+    Write-Log -Message "Using the explicitly supplied -OutputPath: '$effectiveOutputPath'."
+}
+else {
+    $mappingsDataFolder = Resolve-DataRoot -ScriptRoot $PSScriptRoot -DataRootOverride $DataRoot -SubFolderName 'Mappings'
+    $effectiveOutputPath = Join-Path $mappingsDataFolder 'PolicyMappings-Generated.csv'
+}
 
 Write-Log -Message 'Phase 1: parsing ADMX/ADML files...'
 $admxCatalog = @(Get-AdmxCatalog -Path $PolicyDefinitionsPath -Language $Language -SampleSize $SampleSize)
@@ -1021,15 +1204,19 @@ $tierCCount = @($mappingRows | Where-Object { $_.Tier -eq 'C' }).Count
 
 # Device corroboration breakdown: of the Tier B name matches, how many were
 # actually checked against live device registry evidence, and how many of
-# those were promoted to Tier A because BOTH GpoConfigured and MdmConfigured
-# came back true. CorroborationPromoted rows are exactly the subset that
-# matters most: name-matched settings that are CURRENTLY, actually,
-# GPO-configured on this device AND have a live MDM equivalent with hard
-# registry-level proof - not just an unverified name coincidence. This is
+# those were promoted to Tier A - broken out by WHICH of the two promotion
+# rules fired (see Get-MappingRows / the header comment). CorroborationPromoted
+# rows are exactly the subset that matters most: name-matched settings with
+# hard registry-level proof of either (a) both sides currently configured, or
+# (b) MDM currently winning where the GPO side is absent in the way
+# MDMWinsOverGP predicts - not just an unverified name coincidence. This is
 # necessarily a subset of the full catalog (only settings actually applied
-# via GPO on this device can ever be corroborated this way); see README.md.
+# via GPO, or actually MDM-winning, on this device can ever be corroborated
+# this way); see README.md.
 $corroborationCheckedCount  = @($mappingRows | Where-Object { $_.CorroborationChecked }).Count
 $corroborationPromotedCount = @($mappingRows | Where-Object { $_.CorroborationPromoted }).Count
+$corroborationPromotedBothCount = @($mappingRows | Where-Object { $_.PromotionPath -eq 'BothConfigured' }).Count
+$corroborationPromotedMdmWinCount = @($mappingRows | Where-Object { $_.PromotionPath -eq 'MdmWinningProvider' }).Count
 
 $mappedCspCount = @($mappingRows | Select-Object -Property CspArea, CspPolicy -Unique).Count
 $cspCoveragePct = if ($cspCatalog.Count -gt 0) {
@@ -1046,7 +1233,9 @@ Write-Log -Message "Tier C rows (fuzzy, review only):              $tierCCount"
 Write-Log -Message "Total mapping rows:                            $($mappingRows.Count)"
 Write-Log -Message "Distinct CSP policies mapped:                  $mappedCspCount of $($cspCatalog.Count) ($cspCoveragePct%)"
 Write-Log -Message "Name-matched rows checked for device corroboration: $corroborationCheckedCount"
-Write-Log -Message "  -> promoted to Tier A (GPO AND MDM both currently configured, live registry proof): $corroborationPromotedCount"
+Write-Log -Message "  -> promoted to Tier A (total, either path):                 $corroborationPromotedCount"
+Write-Log -Message "     - path=BothConfigured (GPO AND MDM both currently configured, live registry proof): $corroborationPromotedBothCount"
+Write-Log -Message "     - path=MdmWinningProvider (GPO absent, MDM live and winning - suggestive of a resolved conflict, not standalone proof): $corroborationPromotedMdmWinCount"
 Write-Log -Message '-------------------------------------------------------------------'
 
 if ($mappingRows.Count -eq 0) {
@@ -1064,13 +1253,13 @@ if ($mappingRows.Count -eq 0) {
 # the warning above), so it must not crash the run.
 $outputRows = @($mappingRows | Select-Object GpoSetting, GpoName, CspArea, CspPolicy, OmaUri, Notes)
 
-$outputDir = Split-Path -Path $OutputPath -Parent
+$outputDir = Split-Path -Path $effectiveOutputPath -Parent
 if ($outputDir -and -not (Test-Path -LiteralPath $outputDir)) {
     New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
 }
 
-$outputRows | Export-Csv -LiteralPath $OutputPath -NoTypeInformation -Encoding UTF8
-Write-Log -Message "Wrote $($outputRows.Count) mapping row(s) to '$OutputPath'."
+$outputRows | Export-Csv -LiteralPath $effectiveOutputPath -NoTypeInformation -Encoding UTF8
+Write-Log -Message "Wrote $($outputRows.Count) mapping row(s) to '$effectiveOutputPath'."
 
 if (-not [string]::IsNullOrWhiteSpace($GpoSettingsCsv)) {
     if (-not (Test-Path -LiteralPath $GpoSettingsCsv)) {
@@ -1104,8 +1293,8 @@ if (-not [string]::IsNullOrWhiteSpace($GpoSettingsCsv)) {
             )
 
             $filteredPath = [System.IO.Path]::Combine(
-                (Split-Path -Path $OutputPath -Parent),
-                ([System.IO.Path]::GetFileNameWithoutExtension($OutputPath) + '-Filtered.csv')
+                (Split-Path -Path $effectiveOutputPath -Parent),
+                ([System.IO.Path]::GetFileNameWithoutExtension($effectiveOutputPath) + '-Filtered.csv')
             )
 
             $filteredRows | Export-Csv -LiteralPath $filteredPath -NoTypeInformation -Encoding UTF8

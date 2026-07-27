@@ -12,8 +12,10 @@
       - MDM diagnostic output
       - Registry policy snapshots
       - Candidate overlaps between GPO and MDM settings
-      - Verified overlaps supplied through an optional mapping CSV
-      - HTML and CSV reports
+      - Every applied GPO setting, left-joined to CSP mapping/MDM evidence
+        where known (see -MappingCsv / -GenerateMappings)
+      - An interactive, sortable/filterable, dark-mode-capable HTML report,
+        plus CSV reports
 
     Troubleshooting a run:
       - Log.txt (in the evidence root folder) is a timestamped, leveled
@@ -25,11 +27,44 @@
     Important:
       - Event 881 is treated as MDM PolicyManager activity, not proof of a GPO conflict.
       - Automatic name matching is heuristic.
-      - A verified one-to-one GPO-to-CSP mapping requires a mapping CSV or manual validation.
+      - A verified one-to-one GPO-to-CSP mapping requires a mapping CSV
+        (hand-curated, or auto-generated via -GenerateMappings /
+        Build-PolicyMappings.ps1) or manual validation.
       - MDMWinsOverGP applies to Policy CSP settings, not every Windows management CSP.
+      - This toolkit is designed for central deployment (network share, Intune
+        Win32 app, SCCM, RMM push): every path resolves from $PSScriptRoot,
+        never a hardcoded absolute path or the current working directory, and
+        input/output data lives under one "Data" folder next to the scripts
+        (falling back automatically to a machine-local ProgramData location
+        when the script folder is not writable). See -DataRoot below and
+        README.md's "Central deployment" section.
 
 .PARAMETER OutputRoot
-    Parent folder for the evidence package.
+    Parent folder for the evidence package. Optional - when not supplied, the
+    effective root is chosen automatically (see -DataRoot below): normally
+    "<script folder>\Data\Evidence", or a machine-local fallback under
+    $env:ProgramData when the script folder is not writable. Passing this
+    parameter explicitly always wins over both the default and -DataRoot.
+
+.PARAMETER DataRoot
+    Optional. Forces the base folder under which this run's per-purpose data
+    subfolders (Evidence\, Mappings\, Input\) are created, for centrally
+    deployed scenarios (network share, Intune Win32 app, SCCM, RMM push)
+    where an administrator wants an explicit, predictable location rather
+    than the automatic script-folder-or-ProgramData choice. Ignored for a
+    given output when the caller also supplies the more specific explicit
+    path parameter for that output (e.g. -OutputRoot) - the specific
+    parameter always wins.
+
+    When neither -OutputRoot nor -DataRoot is supplied, this script first
+    tries "<script folder>\Data" (portable: works when the whole toolkit
+    folder is copied anywhere and the caller can write next to it, e.g. a
+    USB stick or a writable share). If that folder cannot actually be
+    written to - common when the script runs from a read-only UNC share, an
+    Intune package cache, or a signed/locked deployment folder - it falls
+    back automatically to "$env:ProgramData\MDMWinsOverGP\Data", a
+    machine-local location that is normally writable even when running as
+    SYSTEM. Either way, which root was chosen and why is logged at INFO.
 
 .PARAMETER SinceHours
     Number of hours of DeviceManagement events to include in CSV reports.
@@ -44,6 +79,31 @@
       CspPolicy
       OmaUri
       Notes
+
+    If both -MappingCsv and -GenerateMappings are supplied, -MappingCsv wins
+    for the run and that choice is logged clearly; -GenerateMappings is only
+    used to produce the mapping when -MappingCsv was not supplied.
+
+.PARAMETER GenerateMappings
+    Before the mapping/overlap analysis step, runs Build-PolicyMappings.ps1
+    (resolved relative to this script's own folder via $PSScriptRoot, never
+    the current working directory - so this works regardless of how or from
+    where the script was launched) to auto-generate a GPO-to-CSP mapping CSV
+    from the local ADMX catalog and live registry evidence, filtered to the
+    GPO settings actually observed on this device in this run (via the
+    GPO-Settings.csv this script itself just wrote). The result is written
+    into this run's own evidence folder (under Reports\), never into the
+    caller's working directory, and is then used as the effective
+    -MappingCsv for the rest of the run - unless the caller also supplied an
+    explicit -MappingCsv, which always takes precedence (logged clearly
+    either way). Build-PolicyMappings.ps1 is invoked as a separate
+    powershell.exe child process (not dot-sourced) specifically so its own
+    Write-Log function, variables, and Set-StrictMode scope can never
+    collide with or clobber this script's; see Invoke-PolicyMappingsGenerator
+    for the full rationale. This entire step is non-fatal: if
+    Build-PolicyMappings.ps1 cannot be found or the child process fails, a
+    WARN is logged and collection continues exactly as if -GenerateMappings
+    had not been passed.
 
 .PARAMETER EnableDebugLog
     Enables the DeviceManagement-Enterprise-Diagnostics-Provider Debug channel.
@@ -67,14 +127,22 @@
 
 .EXAMPLE
     .\Test-MDMWinsOverGP.ps1 -MappingCsv .\PolicyMappings.csv -SinceHours 48
+
+.EXAMPLE
+    .\Test-MDMWinsOverGP.ps1 -GenerateMappings -SinceHours 48
+
+.EXAMPLE
+    .\Test-MDMWinsOverGP.ps1 -DataRoot '\\fileserver\share\MDMWinsOverGP' -GenerateMappings
 #>
 
 [CmdletBinding()]
 param(
-    [string]$OutputRoot = "$env:PUBLIC\Documents\MDMWinsOverGP-Validation",
+    [string]$OutputRoot,
+    [string]$DataRoot,
     [ValidateRange(1, 720)]
     [int]$SinceHours = 24,
     [string]$MappingCsv,
+    [switch]$GenerateMappings,
     [switch]$EnableDebugLog,
     [switch]$DisableDebugLogAfterCollection,
     [switch]$RunGpUpdate,
@@ -134,6 +202,76 @@ function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+# Best-effort probe: can we actually create/write in $Path? Used to decide
+# whether the portable "<script folder>\Data" location is usable, or whether
+# this is a read-only/locked central deployment (UNC share, Intune package
+# cache, signed folder) that requires falling back to a machine-local
+# writable location instead. Never throws - a probe failure simply means
+# "not writable", which is exactly the condition this exists to detect, not
+# an error worth surfacing on its own.
+function Test-PathWritable {
+    param([Parameter(Mandatory)][string]$Path)
+
+    try {
+        New-Item -ItemType Directory -Path $Path -Force -ErrorAction Stop | Out-Null
+        $probeFile = Join-Path $Path ".write-test-$([guid]::NewGuid().ToString('N')).tmp"
+        Set-Content -LiteralPath $probeFile -Value 'probe' -Encoding UTF8 -ErrorAction Stop
+        Remove-Item -LiteralPath $probeFile -Force -ErrorAction SilentlyContinue
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
+# Resolves the effective base folder for one purpose-named data subfolder
+# (e.g. 'Evidence'), applying this toolkit's central-deployment precedence
+# rules (see the -OutputRoot/-DataRoot comment-based help above):
+#   1. An explicit path the caller passed for this exact output (e.g.
+#      -OutputRoot) always wins outright - not touched further.
+#   2. -DataRoot, if supplied, forces "<DataRoot>\<SubFolderName>" - for an
+#      administrator pinning a central-deployment location explicitly.
+#   3. Otherwise, try the portable "<script folder>\Data\<SubFolderName>"
+#      location, which is what makes the whole toolkit folder work when
+#      simply copied somewhere writable (USB stick, writable share).
+#   4. If (3) is not actually writable - the common case for a read-only UNC
+#      share, an Intune package cache, or a signed/locked deployment folder,
+#      i.e. exactly the central-deployment scenario this toolkit targets -
+#      fall back to a machine-local location under $env:ProgramData, which
+#      is normally writable even when running as SYSTEM.
+# Every branch is logged at INFO so a troubleshooter can see which root was
+# chosen and why without having to reproduce the decision by hand.
+function Resolve-DataRoot {
+    param(
+        [Parameter(Mandatory)][string]$ScriptRoot,
+        [string]$ExplicitPath,
+        [string]$DataRootOverride,
+        [Parameter(Mandatory)][string]$SubFolderName
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($ExplicitPath)) {
+        Write-Log -Message "Using the explicitly supplied path for '$SubFolderName': '$ExplicitPath'."
+        return $ExplicitPath
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($DataRootOverride)) {
+        $forced = Join-Path $DataRootOverride $SubFolderName
+        Write-Log -Message "Using -DataRoot override for the '$SubFolderName' data folder: '$forced'."
+        return $forced
+    }
+
+    $portableBase = Join-Path $ScriptRoot 'Data'
+    $portablePath = Join-Path $portableBase $SubFolderName
+    if (Test-PathWritable -Path $portableBase) {
+        Write-Log -Message "Script folder is writable; using the portable data location '$portablePath'."
+        return $portablePath
+    }
+
+    $fallbackPath = Join-Path (Join-Path $env:ProgramData 'MDMWinsOverGP\Data') $SubFolderName
+    Write-Log -Message "Script folder '$ScriptRoot' is not writable (common for a read-only UNC share, an Intune package cache, or a signed/locked deployment folder). Falling back to the machine-local data location '$fallbackPath'."
+    return $fallbackPath
 }
 
 # Strips characters that are illegal in Windows file names (e.g. from event
@@ -328,17 +466,46 @@ function Export-DmEvents {
                 StartTime = $StartTime
             } -ErrorAction Stop
 
-            foreach ($event in $events) {
+            # Loop variable is named $evt, NOT $event: $Event is a PowerShell
+            # automatic variable (normally populated inside
+            # Register-ObjectEvent/Register-EngineEvent handler scriptblocks).
+            # Reusing it as an ordinary foreach variable shadows the automatic
+            # variable for the lifetime of the loop, which was the prime
+            # suspect for event IDs coming through as 0 in earlier runs of
+            # this script. Every other automatic-variable name in this file
+            # ($input, $args, $matches, $host, $error, etc.) was also audited
+            # for the same mistake - none of the others were misused as plain
+            # loop/local variables.
+            foreach ($evt in $events) {
                 $message = ''
-                try { $message = $event.FormatDescription() } catch { $message = $event.Message }
+                try { $message = $evt.FormatDescription() } catch { $message = $evt.Message }
+
+                # Defensive ID capture: prefer the provider-authored .Id
+                # property. Do not silently fall back to 0 if it cannot be
+                # read - that would reproduce the exact misleading symptom
+                # this fix is for. RecordId (captured separately below) is a
+                # different concept - the log's own per-record sequence
+                # number - and is NOT a substitute for the provider's event
+                # ID, so it is intentionally not used as an Id fallback.
+                # EventLogRecord exposes no other alternate identifier, so
+                # when .Id genuinely cannot be read the field is left blank
+                # (visibly missing) rather than defaulted to 0.
+                $evtId = $null
+                try {
+                    $rawId = $evt.Id
+                    if ($null -ne $rawId) { $evtId = $rawId }
+                }
+                catch {
+                    Write-Verbose "Could not read the Id property for an event in $($evt.LogName): $($_.Exception.Message)"
+                }
 
                 $eventRows.Add([pscustomobject]@{
-                    TimeCreated = $event.TimeCreated
-                    LogName     = $event.LogName
-                    Id          = $event.Id
-                    Level       = $event.LevelDisplayName
-                    Provider    = $event.ProviderName
-                    RecordId    = $event.RecordId
+                    TimeCreated = $evt.TimeCreated
+                    LogName     = $evt.LogName
+                    Id          = if ($null -ne $evtId) { $evtId } else { '' }
+                    Level       = $evt.LevelDisplayName
+                    Provider    = $evt.ProviderName
+                    RecordId    = $evt.RecordId
                     Message     = ($message -replace "`r?`n", ' | ')
                 })
             }
@@ -442,7 +609,12 @@ function Invoke-GpUpdate {
 function Get-FirstNodeText {
     param(
         [Parameter(Mandatory)][System.Xml.XmlNode]$Node,
-        [Parameter(Mandatory)][string[]]$LocalNames
+        # AllowEmptyCollection alongside Mandatory: without it, PowerShell's
+        # binder rejects an empty array bound to a Mandatory array parameter
+        # as "no value supplied," even though every call site here always
+        # passes a non-empty literal - this is defensive, matching the
+        # blanket rule this toolkit follows for every Mandatory array param.
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$LocalNames
     )
 
     foreach ($name in $LocalNames) {
@@ -674,11 +846,125 @@ function Import-VerifiedMappings {
     }
 }
 
-# For each human-verified mapping row, checks whether the GPO side and the
-# MDM side were actually observed in this run's evidence and produces a
-# report row with a plain-English status. This is the highest-confidence
-# overlap evidence the report can show (Confidence = 1), since it is based
-# on a mapping a person confirmed rather than name-similarity guessing.
+# Implements -GenerateMappings: runs Build-PolicyMappings.ps1 to auto-
+# generate a starting-point GPO-to-CSP mapping CSV, filtered to the GPO
+# settings actually observed on this device in this run, and returns the
+# path to the resulting "*-Filtered.csv" (or $null on any failure/absence -
+# every failure mode here is non-fatal to the caller by design).
+#
+# Why a child powershell.exe process instead of dot-sourcing:
+# Build-PolicyMappings.ps1 is a large, independently-maintained standalone
+# script with its own Set-StrictMode -Version 2, its own Write-Log function,
+# and dozens of its own script-scope-adjacent variables ($admxCatalog,
+# $cspCatalog, $mappingRows, etc.). Dot-sourcing it would run all of that
+# directly in this script's scope, so its Write-Log would silently replace
+# this script's Write-Log (breaking Log.txt), and any variable name
+# collision (deliberate or accidental, now or in a future edit to either
+# script) would silently clobber state in either direction. A child
+# "powershell.exe -File" process gets a completely independent process,
+# scope, and $ErrorActionPreference, so nothing it does - success or
+# failure - can ever reach back into this script's state. The only price is
+# marshalling its console output back in (captured and re-logged below) and
+# checking its exit code / the file it was supposed to produce.
+function Invoke-PolicyMappingsGenerator {
+    param(
+        [Parameter(Mandatory)][string]$ScriptRoot,
+        [Parameter(Mandatory)][string]$ReportsFolder,
+        [Parameter(Mandatory)][string]$GpoSettingsCsvPath
+    )
+
+    $builderPath = Join-Path $ScriptRoot 'Build-PolicyMappings.ps1'
+    if (-not (Test-Path -LiteralPath $builderPath)) {
+        Write-Log -Level WARN -Message "-GenerateMappings was specified, but Build-PolicyMappings.ps1 was not found next to this script at '$builderPath'. Continuing without an auto-generated mapping."
+        return $null
+    }
+
+    # Output goes into THIS run's own evidence folder (Reports\), never the
+    # caller's working directory or the standalone Data\Mappings location -
+    # an -OutputPath is always an explicit path, so Build-PolicyMappings.ps1's
+    # own Resolve-DataRoot logic is bypassed entirely and this is exactly
+    # where the file lands, deterministically, every time.
+    $generatedPath = Join-Path $ReportsFolder 'PolicyMappings-Generated.csv'
+    $filteredPath  = Join-Path $ReportsFolder 'PolicyMappings-Generated-Filtered.csv'
+
+    $powershellExe = Join-Path $PSHOME 'powershell.exe'
+    if (-not (Test-Path -LiteralPath $powershellExe)) {
+        # Fall back to whatever is on PATH (e.g. pwsh.exe under PowerShell 7)
+        # if the Windows PowerShell 5.1 host path is not present.
+        $powershellExe = 'powershell.exe'
+    }
+
+    $arguments = @(
+        '-NoProfile'
+        '-NonInteractive'
+        '-ExecutionPolicy', 'Bypass'
+        '-File', $builderPath
+        '-OutputPath', $generatedPath
+        '-GpoSettingsCsv', $GpoSettingsCsvPath
+    )
+
+    Write-Log -Message "Running Build-PolicyMappings.ps1 as a child process to auto-generate a mapping CSV filtered to this device's GPO settings..."
+
+    try {
+        # Capture combined stdout/stderr from the child process and re-log
+        # every line through this script's own Write-Log, so the generator's
+        # progress/coverage-summary output ends up in Log.txt alongside
+        # everything else this run did, without letting its own Write-Log
+        # function ever execute in this script's scope.
+        $childOutput = & $powershellExe @arguments 2>&1
+        $childExitCode = $LASTEXITCODE
+
+        foreach ($outputLine in $childOutput) {
+            Write-Log -Message "[Build-PolicyMappings] $outputLine"
+        }
+
+        if ($childExitCode -ne 0) {
+            Write-Log -Level WARN -Message "Build-PolicyMappings.ps1 exited with code $childExitCode. Continuing without an auto-generated mapping."
+            return $null
+        }
+
+        if (-not (Test-Path -LiteralPath $filteredPath)) {
+            # A filtered CSV is only written when GpoSettingsCsv matched at
+            # least one row inside Build-PolicyMappings.ps1 - see its own
+            # non-fatal handling of an empty/missing GpoSettingsCsv. Falling
+            # back to the unfiltered output keeps this run usable instead of
+            # silently discarding a mapping that was in fact generated.
+            if (Test-Path -LiteralPath $generatedPath) {
+                Write-Log -Level WARN -Message "Build-PolicyMappings.ps1 did not produce a filtered mapping CSV at '$filteredPath'; falling back to the unfiltered mapping at '$generatedPath'."
+                return $generatedPath
+            }
+
+            Write-Log -Level WARN -Message "Build-PolicyMappings.ps1 completed but produced no mapping CSV at '$generatedPath' or '$filteredPath'. Continuing without an auto-generated mapping."
+            return $null
+        }
+
+        Write-Log -Message "Auto-generated, device-filtered mapping CSV: '$filteredPath'."
+        return $filteredPath
+    }
+    catch {
+        Write-Log -Level WARN -Message "Failed to run Build-PolicyMappings.ps1. Continuing without an auto-generated mapping. $($_.Exception.Message)"
+        return $null
+    }
+}
+
+# For EVERY GPO setting actually applied on this device (from GPResult),
+# left-joins it to the optional -MappingCsv and to MDM evidence, and
+# produces a report row with a plain-English status. This is an inversion of
+# the original design, which iterated $Mappings and therefore only ever
+# showed GPO settings that already had a mapping row - the majority of a
+# device's applied GPO settings (which typically have no known CSP mapping)
+# never appeared at all. Now every applied GPO setting is represented:
+#   - has a mapping AND MDM evidence  -> "Confirmed overlap" (this is the
+#     highest-confidence evidence the report can show, since it is based on
+#     a mapping a person or Build-PolicyMappings.ps1 produced, not
+#     name-similarity guessing at report time).
+#   - has a mapping but no MDM evidence -> mapped, MDM side not configured.
+#   - has NO mapping at all -> 'No known CSP mapping'. This is expected to
+#     be the common case (most GPO settings have no documented Policy CSP
+#     equivalent), not an error condition.
+# GPResult can yield the same setting more than once (e.g. across categories
+# or policy extensions), so rows are deduplicated by (GpoSetting, GpoName)
+# before the join.
 function Get-VerifiedOverlapRows {
     param(
         [object[]]$Mappings,
@@ -686,48 +972,70 @@ function Get-VerifiedOverlapRows {
         [object[]]$MdmRows
     )
 
-    foreach ($mapping in $Mappings) {
-        $matchingGpo = @(
-            $GpoRows | Where-Object {
-                ($_.GpoSetting -eq $mapping.GpoSetting -or
-                 (Normalize-PolicyName $_.GpoSetting) -eq (Normalize-PolicyName $mapping.GpoSetting)) -and
-                ([string]::IsNullOrWhiteSpace($mapping.GpoName) -or $_.GpoName -eq $mapping.GpoName)
-            }
-        )
+    $distinctGpoRows = @(
+        $GpoRows |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_.GpoSetting) } |
+        Group-Object GpoSetting, GpoName |
+        ForEach-Object { $_.Group | Select-Object -First 1 }
+    )
 
-        $matchingMdm = @(
-            $MdmRows | Where-Object {
-                $_.Area -eq $mapping.CspArea -and
-                ($_.Policy -eq $mapping.CspPolicy -or $_.ValueName -eq $mapping.CspPolicy)
+    foreach ($gpo in $distinctGpoRows) {
+        # A mapping row's GpoName is an optional additional filter (some GPO
+        # setting names are ambiguous without knowing which GPO won them);
+        # when the mapping row supplies one, require it to match too.
+        $mapping = $Mappings | Where-Object {
+            (
+                $_.GpoSetting -eq $gpo.GpoSetting -or
+                (Normalize-PolicyName $_.GpoSetting) -eq (Normalize-PolicyName $gpo.GpoSetting)
+            ) -and (
+                [string]::IsNullOrWhiteSpace($_.GpoName) -or $_.GpoName -eq $gpo.GpoName
+            )
+        } | Select-Object -First 1
+
+        $matchingMdm = @()
+        if ($mapping) {
+            $matchingMdm = @(
+                $MdmRows | Where-Object {
+                    $_.Area -eq $mapping.CspArea -and
+                    ($_.Policy -eq $mapping.CspPolicy -or $_.ValueName -eq $mapping.CspPolicy)
+                }
+            )
+        }
+
+        # This row exists precisely because it is an applied GPO setting
+        # observed in GPResult, so GpoConfigured is always true here - unlike
+        # the old mapping-first design, there is no "mapped but GPO side
+        # missing" case any more; a mapping row whose GPO setting never
+        # appears in GPResult simply never produces a row (nothing to join
+        # it to). MdmConfigured is only meaningful once a mapping exists.
+        $mdmConfigured = $matchingMdm.Count -gt 0
+
+        $status =
+            if (-not $mapping) {
+                'No known CSP mapping'
             }
-        )
+            elseif ($mdmConfigured) {
+                'Confirmed overlap. Validate effective value and behavior.'
+            }
+            else {
+                'Mapped to a CSP policy, but no MDM evidence was observed for it.'
+            }
 
         [pscustomobject]@{
-            MatchType         = 'Verified mapping'
-            Confidence        = 1
-            GpoConfigured     = $matchingGpo.Count -gt 0
-            MdmConfigured     = $matchingMdm.Count -gt 0
-            GpoSetting        = $mapping.GpoSetting
-            GpoName           = (@($matchingGpo | ForEach-Object { $_.GpoName }) | Where-Object { $_ } | Sort-Object -Unique) -join '; '
-            GpoState          = (@($matchingGpo | ForEach-Object { $_.State }) | Where-Object { $_ } | Sort-Object -Unique) -join '; '
-            CspArea           = $mapping.CspArea
-            CspPolicy         = $mapping.CspPolicy
+            MatchType         = if ($mapping) { 'Verified mapping' } else { 'No mapping' }
+            Confidence        = if ($mapping) { 1 } else { 0 }
+            GpoConfigured     = $true
+            MdmConfigured     = $mdmConfigured
+            GpoSetting        = $gpo.GpoSetting
+            GpoName           = $gpo.GpoName
+            GpoState          = $gpo.State
+            CspArea           = if ($mapping) { $mapping.CspArea } else { '' }
+            CspPolicy         = if ($mapping) { $mapping.CspPolicy } else { '' }
             MdmEffectiveValue = (@($matchingMdm | ForEach-Object { $_.EffectiveValue }) | Where-Object { $_ } | Sort-Object -Unique) -join '; '
             WinningProvider   = (@($matchingMdm | ForEach-Object { $_.WinningProvider }) | Where-Object { $_ } | Sort-Object -Unique) -join '; '
-            OmaUri            = $mapping.OmaUri
-            Status            = if ($matchingGpo.Count -gt 0 -and $matchingMdm.Count -gt 0) {
-                                    'Confirmed overlap. Validate effective value and behavior.'
-                                }
-                                elseif ($matchingMdm.Count -gt 0) {
-                                    'Mapped setting found only in MDM evidence.'
-                                }
-                                elseif ($matchingGpo.Count -gt 0) {
-                                    'Mapped setting found only in GPO evidence.'
-                                }
-                                else {
-                                    'Mapping not found in collected evidence.'
-                                }
-            Notes             = $mapping.Notes
+            OmaUri            = if ($mapping) { $mapping.OmaUri } else { '' }
+            Status            = $status
+            Notes             = if ($mapping) { $mapping.Notes } else { '' }
         }
     }
 }
@@ -813,32 +1121,184 @@ function ConvertTo-HtmlEncoded {
     return [System.Net.WebUtility]::HtmlEncode([string]$Value)
 }
 
+# Maps a report row's plain-English Status text to a semantic red/amber/green
+# CSS class (see the .status-* rules in $css inside New-HtmlReport). Matched
+# by substring/regex on purpose - Status is free text produced in a few
+# different places in this script (Get-VerifiedOverlapRows), and this keeps
+# working even if that wording is tweaked slightly, not only for one exact
+# string. Returns '' (no class, no color) for anything unrecognized, so an
+# unexpected Status value degrades to "uncolored", never to a misleading color.
+function Get-StatusCssClass {
+    param([string]$Status)
+
+    if ([string]::IsNullOrWhiteSpace($Status)) { return '' }
+
+    if ($Status -match 'Confirmed overlap') { return 'status-red' }
+    if ($Status -match 'No known CSP mapping') { return 'status-green' }
+    if ($Status -match 'Mapped to a CSP policy, but no MDM evidence') { return 'status-amber' }
+    if ($Status -match 'Candidate only') { return 'status-amber' }
+    if ($Status -match 'not found|not conclusive') { return 'status-amber' }
+    return ''
+}
+
+# Maps an event's LevelDisplayName to the same red/amber/green scheme used
+# for Status above, for the "Recent warnings and errors" table.
+function Get-LevelCssClass {
+    param([string]$Level)
+
+    switch ($Level) {
+        'Critical'    { return 'status-red' }
+        'Error'       { return 'status-red' }
+        'Warning'     { return 'status-amber' }
+        'Information' { return 'status-green' }
+        default       { return '' }
+    }
+}
+
 # Renders a collection of objects as an HTML table, one column per named
 # property, with every cell HTML-encoded to prevent broken markup or HTML
 # injection from registry/event data that happens to contain HTML-special
 # characters. Renders a friendly empty-state message instead of an empty
 # table when Rows has no items (this is common and expected, e.g. no GPO
 # settings applied, no verified mappings supplied).
+#
+# -Interactive opts a single table into client-side sorting (and, with
+# -FilterColumns, dropdown filtering) via the inline <script> block New-
+# HtmlReport embeds once for the whole page - see $reportScript there. This
+# is OFF by default so every existing call site keeps rendering exactly the
+# plain static table it always has; only the two call sites in New-HtmlReport
+# that ask for it (Applied GPO settings, Recent warnings and errors) opt in.
+#
+# How sorting/filtering data reaches the browser without weakening HTML
+# encoding: every value written into a data-cN attribute (one per column,
+# N = 0-based column index, matching each <th>'s data-col) is passed through
+# the exact same ConvertTo-HtmlEncoded used for the visible <td> text - n->
+# no extra/weaker encoding path is introduced for the interactive case.
 function Convert-ObjectsToHtmlTable {
     param(
         [object[]]$Rows,
-        [string[]]$Properties,
-        [string]$EmptyMessage = 'No records found.'
+        # Defaults to an empty array (never $null) so a direct .Count access
+        # on $Properties further down can never trip Set-StrictMode -Version
+        # 2's "property 'Count' cannot be found on this object" even if a
+        # future call site forgets to pass -Properties.
+        [string[]]$Properties = @(),
+        [string]$EmptyMessage = 'No records found.',
+        [switch]$Interactive,
+        [string]$TableId,
+        [string[]]$FilterColumns = @(),
+        # Maps a property name to a client-side sort-type hint: 'date',
+        # 'number', or 'severity' (ranked, not alphabetical - see the
+        # severityRank map in $reportScript). Any column not listed here
+        # sorts as plain case-insensitive text. Only consulted when
+        # -Interactive is set.
+        [hashtable]$ColumnSortTypes = @{},
+        # Optional property name whose value (via Get-StatusCssClass) sets a
+        # semantic red/amber/green class on each <tr>.
+        [string]$StatusColumn,
+        # Optional property name whose value (via Get-LevelCssClass) sets a
+        # semantic red/amber/green class on each <tr>.
+        [string]$LevelColumn
     )
 
     if (-not $Rows -or $Rows.Count -eq 0) {
         return "<p>$([System.Net.WebUtility]::HtmlEncode($EmptyMessage))</p>"
     }
 
-    $header = ($Properties | ForEach-Object { "<th>$(ConvertTo-HtmlEncoded $_)</th>" }) -join ''
+    if ($Interactive -and [string]::IsNullOrWhiteSpace($TableId)) {
+        # Programming error, not a data/runtime condition - every interactive
+        # call site in this file supplies a literal -TableId, so this can
+        # only fire if a future call site forgets to.
+        throw 'Convert-ObjectsToHtmlTable: -TableId is required when -Interactive is specified.'
+    }
+
+    $headerCells = for ($i = 0; $i -lt $Properties.Count; $i++) {
+        $propertyName = $Properties[$i]
+        $encodedName = ConvertTo-HtmlEncoded $propertyName
+        if ($Interactive) {
+            $sortType = if ($ColumnSortTypes.ContainsKey($propertyName)) { $ColumnSortTypes[$propertyName] } else { 'text' }
+            "<th data-col=""$i"" data-sort=""$(ConvertTo-HtmlEncoded $sortType)"" class=""sortable"">$encodedName<span class=""sort-indicator""></span></th>"
+        }
+        else {
+            "<th>$encodedName</th>"
+        }
+    }
+    $header = $headerCells -join ''
+
     $bodyRows = foreach ($row in $Rows) {
+        $rowClasses = New-Object System.Collections.Generic.List[string]
+        if ($StatusColumn -and $row.PSObject.Properties.Match($StatusColumn).Count -gt 0) {
+            $statusClass = Get-StatusCssClass -Status ([string]$row.$StatusColumn)
+            if ($statusClass) { $rowClasses.Add($statusClass) }
+        }
+        if ($LevelColumn -and $row.PSObject.Properties.Match($LevelColumn).Count -gt 0) {
+            $levelClass = Get-LevelCssClass -Level ([string]$row.$LevelColumn)
+            if ($levelClass) { $rowClasses.Add($levelClass) }
+        }
+        $classAttr = if ($rowClasses.Count -gt 0) { " class=""$($rowClasses -join ' ')""" } else { '' }
+
+        $dataAttr = ''
+        if ($Interactive) {
+            $attrParts = for ($i = 0; $i -lt $Properties.Count; $i++) {
+                $propertyName = $Properties[$i]
+                $rawValue = $row.$propertyName
+                $sortType = if ($ColumnSortTypes.ContainsKey($propertyName)) { $ColumnSortTypes[$propertyName] } else { 'text' }
+                # Dates get a stable, locale-independent sort key (round-trip
+                # 'o' format) distinct from whatever locale-formatted text the
+                # visible <td> shows, so sorting is correct regardless of how
+                # the value happens to display. Everything else sorts on the
+                # same text the cell shows.
+                $sortValue = if ($sortType -eq 'date' -and $rawValue -is [datetime]) {
+                    $rawValue.ToString('o')
+                }
+                else {
+                    [string]$rawValue
+                }
+                "data-c$i=""$(ConvertTo-HtmlEncoded $sortValue)"""
+            }
+            $dataAttr = ' ' + ($attrParts -join ' ')
+        }
+
         $cells = foreach ($property in $Properties) {
             "<td>$(ConvertTo-HtmlEncoded $row.$property)</td>"
         }
-        "<tr>$($cells -join '')</tr>"
+        "<tr$classAttr$dataAttr>$($cells -join '')</tr>"
     }
 
-    return "<table><thead><tr>$header</tr></thead><tbody>$($bodyRows -join "`n")</tbody></table>"
+    $tableAttrs = if ($Interactive) { " id=""$(ConvertTo-HtmlEncoded $TableId)"" class=""interactive-table""" } else { '' }
+    $table = "<table$tableAttrs><thead><tr>$header</tr></thead><tbody>$($bodyRows -join "`n")</tbody></table>"
+
+    if ($Interactive -and $FilterColumns.Count -gt 0) {
+        # One <select> per requested filter column, auto-populated with the
+        # distinct values actually present in $Rows (never a hardcoded
+        # list) plus an "All" option. data-filter-col matches the column's
+        # data-col/data-cN index so the JS can locate it without depending
+        # on column order or property names at runtime.
+        $filterControls = foreach ($filterColumn in $FilterColumns) {
+            $colIndex = [array]::IndexOf($Properties, $filterColumn)
+            if ($colIndex -lt 0) { continue }
+
+            $distinctValues = @(
+                $Rows | ForEach-Object { [string]$_.$filterColumn } |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                Sort-Object -Unique
+            )
+
+            if ($distinctValues.Count -eq 0) { continue }
+
+            $optionTags = foreach ($value in $distinctValues) {
+                "<option value=""$(ConvertTo-HtmlEncoded $value)"">$(ConvertTo-HtmlEncoded $value)</option>"
+            }
+
+            $labelText = ConvertTo-HtmlEncoded $filterColumn
+            "<label class=""filter-label"">$labelText: <select class=""table-filter"" data-filter-table=""$(ConvertTo-HtmlEncoded $TableId)"" data-filter-col=""$colIndex""><option value="""">All</option>$($optionTags -join '')</select></label>"
+        }
+
+        if ($filterControls) {
+            $table = "<div class=""table-filters"">$($filterControls -join ' ')</div>`n$table"
+        }
+    }
+
+    return $table
 }
 
 # Assembles the final human-readable HTML report from every piece of
@@ -865,11 +1325,20 @@ function New-HtmlReport {
     $event881 = @($Events | Where-Object Id -eq 881)
     $eventErrors = @($Events | Where-Object { $_.Level -in @('Error','Critical','Warning') })
 
+    # "Verified overlaps" keeps its original meaning (mapped AND both sides
+    # currently configured) even though $VerifiedRows now contains every
+    # applied GPO setting, not just mapped ones - see Get-VerifiedOverlapRows.
+    # GpoConfigured is trivially true for every row here (the row only exists
+    # because it IS an applied GPO setting), so this reduces to exactly
+    # "mapped and MDM evidence found," the same metric as before the Task 2
+    # change - it stays comparable across report versions.
     $verifiedBoth = @($VerifiedRows | Where-Object { $_.GpoConfigured -and $_.MdmConfigured })
+    $unmappedGpoSettings = @($VerifiedRows | Where-Object { $_.MatchType -eq 'No mapping' })
     $summaryRows = @(
         [pscustomobject]@{ Metric = 'MDMWinsOverGP'; Value = $ConflictState.Interpretation }
         [pscustomobject]@{ Metric = 'GPO settings parsed'; Value = $GpoRows.Count }
         [pscustomobject]@{ Metric = 'PolicyManager effective rows'; Value = $MdmRows.Count }
+        [pscustomobject]@{ Metric = 'Applied GPO settings with no known CSP mapping'; Value = $unmappedGpoSettings.Count }
         [pscustomobject]@{ Metric = 'Verified overlaps'; Value = $verifiedBoth.Count }
         [pscustomobject]@{ Metric = 'Heuristic candidates'; Value = $HeuristicRows.Count }
         [pscustomobject]@{ Metric = 'Recent Event 881 records'; Value = $event881.Count }
@@ -877,15 +1346,288 @@ function New-HtmlReport {
         [pscustomobject]@{ Metric = 'Evidence folder'; Value = $EvidenceFolder }
     )
 
+    # CSS custom properties (variables) so light and dark mode are one
+    # stylesheet, not two - $reportScript's toggleTheme()/initTheme() below
+    # only ever flip the data-theme attribute on <html>; every color comes
+    # from these variables. Red/amber/green status shades are deliberately
+    # different (not simply inverted) between the two modes: the light-mode
+    # shades are pale backgrounds with dark, saturated text, which would be
+    # nearly illegible if naively inverted onto a dark background, so the
+    # dark-mode shades use darker, desaturated backgrounds with light,
+    # brighter text instead - both pairs independently chosen for real
+    # contrast, not derived from each other.
     $css = @'
-body { font-family: Segoe UI, Arial, sans-serif; margin: 28px; color: #202124; }
-h1, h2 { color: #1f3a5f; }
+:root {
+  --bg: #ffffff;
+  --fg: #202124;
+  --heading: #1f3a5f;
+  --border: #d0d7de;
+  --th-bg: #eef3f8;
+  --code-bg: #f3f4f6;
+  --note-bg: #fff8dc;
+  --note-border: #b8860b;
+  --good-bg: #eef8ee;
+  --good-border: #2e7d32;
+  --status-red-bg: #fdecea;
+  --status-red-fg: #8a1c1c;
+  --status-amber-bg: #fff4e0;
+  --status-amber-fg: #7a4b00;
+  --status-green-bg: #eaf7ec;
+  --status-green-fg: #1e5c2c;
+  --link: #0b5fff;
+  --control-bg: #f6f8fa;
+}
+
+:root[data-theme="dark"] {
+  --bg: #14181d;
+  --fg: #e6edf3;
+  --heading: #8fb4e6;
+  --border: #3a4048;
+  --th-bg: #232a32;
+  --code-bg: #232a32;
+  --note-bg: #3a3218;
+  --note-border: #d9a441;
+  --good-bg: #163420;
+  --good-border: #4caf50;
+  --status-red-bg: #4a2020;
+  --status-red-fg: #ff9b93;
+  --status-amber-bg: #473512;
+  --status-amber-fg: #ffcf6b;
+  --status-green-bg: #163a22;
+  --status-green-fg: #8fe3a4;
+  --link: #6ea8fe;
+  --control-bg: #1c232b;
+}
+
+/* Respect the OS preference as the initial default only when the user has
+   not made an explicit choice yet (before $reportScript's initTheme() runs
+   and stamps data-theme on <html> from localStorage, or on a browser with
+   scripting disabled). Explicit choices below always win over this. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="dark"]) {
+    --bg: #14181d;
+    --fg: #e6edf3;
+    --heading: #8fb4e6;
+    --border: #3a4048;
+    --th-bg: #232a32;
+    --code-bg: #232a32;
+    --note-bg: #3a3218;
+    --note-border: #d9a441;
+    --good-bg: #163420;
+    --good-border: #4caf50;
+    --status-red-bg: #4a2020;
+    --status-red-fg: #ff9b93;
+    --status-amber-bg: #473512;
+    --status-amber-fg: #ffcf6b;
+    --status-green-bg: #163a22;
+    --status-green-fg: #8fe3a4;
+    --link: #6ea8fe;
+    --control-bg: #1c232b;
+  }
+}
+
+body { font-family: Segoe UI, Arial, sans-serif; margin: 28px; color: var(--fg); background: var(--bg); }
+h1, h2 { color: var(--heading); }
+a { color: var(--link); }
 table { border-collapse: collapse; width: 100%; margin: 12px 0 28px 0; font-size: 12px; }
-th, td { border: 1px solid #d0d7de; padding: 6px 8px; vertical-align: top; text-align: left; }
-th { background: #eef3f8; position: sticky; top: 0; }
-.note { padding: 12px; background: #fff8dc; border-left: 4px solid #b8860b; }
-.good { padding: 12px; background: #eef8ee; border-left: 4px solid #2e7d32; }
-code { background: #f3f4f6; padding: 2px 4px; }
+th, td { border: 1px solid var(--border); padding: 6px 8px; vertical-align: top; text-align: left; }
+th { background: var(--th-bg); position: sticky; top: 0; }
+.note { padding: 12px; background: var(--note-bg); border-left: 4px solid var(--note-border); }
+.good { padding: 12px; background: var(--good-bg); border-left: 4px solid var(--good-border); }
+code { background: var(--code-bg); padding: 2px 4px; }
+
+/* Semantic red/amber/green row coloring (Task 5), applied via classes set
+   in Convert-ObjectsToHtmlTable's -StatusColumn/-LevelColumn, never via
+   inline styles - the classes carry the color so a single edit to these
+   rules (or the CSS variables above) re-colors every table consistently. */
+.status-red   { background: var(--status-red-bg);   color: var(--status-red-fg); }
+.status-amber { background: var(--status-amber-bg); color: var(--status-amber-fg); }
+.status-green { background: var(--status-green-bg); color: var(--status-green-fg); }
+
+/* Sortable/filterable table chrome (Task 4). */
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { filter: brightness(0.95); }
+:root[data-theme="dark"] th.sortable:hover { filter: brightness(1.2); }
+.sort-indicator { display: inline-block; width: 1em; }
+.table-filters { margin: 8px 0; display: flex; flex-wrap: wrap; gap: 12px; }
+.filter-label { font-size: 12px; }
+select.table-filter {
+  margin-left: 4px;
+  background: var(--control-bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  padding: 2px 4px;
+}
+
+/* Dark mode toggle button. */
+#theme-toggle {
+  background: var(--control-bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  float: right;
+}
+#theme-toggle:hover { filter: brightness(1.1); }
+'@
+
+    # Inline vanilla JS only - no external libraries or CDN references, so
+    # the report stays a single, fully self-contained file that works
+    # offline and under a strict CSP. This MUST be a single-quoted, non-
+    # interpolating here-string (@'...'@, not @"..."@): the JS below uses
+    # both ${...}-shaped template-literal-style text in comments and plain
+    # $ is never used here, but bracing this way means neither the literal
+    # '{'/'}' characters nor any '$' the script is ever edited to include
+    # can accidentally be parsed as PowerShell subexpressions/variables -
+    # the whole block is captured as inert text and only ever emitted
+    # verbatim into the page below.
+    $reportScript = @'
+(function () {
+  "use strict";
+
+  var THEME_KEY = "mdmwinsovergp-theme";
+
+  // Severity rank map for the Level column's "severity" sort type (Task 4):
+  // explicit rank, not alphabetical, so Critical > Error > Warning as
+  // requested, and anything unrecognized sorts lowest rather than crashing.
+  var severityRank = {
+    "Critical": 4,
+    "Error": 3,
+    "Warning": 2,
+    "Information": 1,
+    "Verbose": 0
+  };
+
+  function applyTheme(theme) {
+    document.documentElement.setAttribute("data-theme", theme);
+    var btn = document.getElementById("theme-toggle");
+    if (btn) {
+      btn.textContent = theme === "dark" ? "Switch to light mode" : "Switch to dark mode";
+    }
+  }
+
+  function initTheme() {
+    var stored = null;
+    try { stored = localStorage.getItem(THEME_KEY); } catch (e) { /* storage disabled/unavailable */ }
+
+    var theme = stored;
+    if (!theme) {
+      var prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+      theme = prefersDark ? "dark" : "light";
+    }
+    applyTheme(theme);
+  }
+
+  function toggleTheme() {
+    var current = document.documentElement.getAttribute("data-theme") || "light";
+    var next = current === "dark" ? "light" : "dark";
+    applyTheme(next);
+    try { localStorage.setItem(THEME_KEY, next); } catch (e) { /* storage disabled/unavailable */ }
+  }
+
+  function getSortValue(row, colIndex, sortType) {
+    var raw = row.getAttribute("data-c" + colIndex) || "";
+    if (sortType === "number") {
+      var n = parseFloat(raw);
+      return isNaN(n) ? -Infinity : n;
+    }
+    if (sortType === "date") {
+      var t = Date.parse(raw);
+      return isNaN(t) ? -Infinity : t;
+    }
+    if (sortType === "severity") {
+      return Object.prototype.hasOwnProperty.call(severityRank, raw) ? severityRank[raw] : -1;
+    }
+    return raw.toLowerCase();
+  }
+
+  function sortTable(table, th, colIndex, sortType) {
+    var tbody = table.tBodies[0];
+    if (!tbody) { return; }
+    var rows = Array.prototype.slice.call(tbody.rows);
+
+    var ascending = th.getAttribute("data-sort-dir") !== "asc";
+
+    var headerRow = table.tHead.rows[0];
+    Array.prototype.forEach.call(headerRow.cells, function (cell) {
+      cell.removeAttribute("data-sort-dir");
+      var indicator = cell.querySelector(".sort-indicator");
+      if (indicator) { indicator.textContent = ""; }
+    });
+    th.setAttribute("data-sort-dir", ascending ? "asc" : "desc");
+    var thIndicator = th.querySelector(".sort-indicator");
+    if (thIndicator) { thIndicator.textContent = ascending ? " ▲" : " ▼"; }
+
+    rows.sort(function (a, b) {
+      var va = getSortValue(a, colIndex, sortType);
+      var vb = getSortValue(b, colIndex, sortType);
+      if (va < vb) { return ascending ? -1 : 1; }
+      if (va > vb) { return ascending ? 1 : -1; }
+      return 0;
+    });
+
+    rows.forEach(function (row) { tbody.appendChild(row); });
+  }
+
+  function applyFilters(tableId) {
+    var table = document.getElementById(tableId);
+    if (!table || !table.tBodies[0]) { return; }
+
+    var selects = document.querySelectorAll('select.table-filter[data-filter-table="' + tableId + '"]');
+    var rows = table.tBodies[0].rows;
+
+    for (var r = 0; r < rows.length; r++) {
+      var visible = true;
+      for (var s = 0; s < selects.length; s++) {
+        var sel = selects[s];
+        var wanted = sel.value;
+        if (!wanted) { continue; }
+        var col = sel.getAttribute("data-filter-col");
+        var cellValue = rows[r].getAttribute("data-c" + col) || "";
+        if (cellValue !== wanted) {
+          visible = false;
+          break;
+        }
+      }
+      rows[r].style.display = visible ? "" : "none";
+    }
+  }
+
+  function init() {
+    initTheme();
+
+    var toggleButton = document.getElementById("theme-toggle");
+    if (toggleButton) {
+      toggleButton.addEventListener("click", toggleTheme);
+    }
+
+    var sortableHeaders = document.querySelectorAll("th.sortable");
+    Array.prototype.forEach.call(sortableHeaders, function (th) {
+      th.addEventListener("click", function () {
+        var table = th.closest("table");
+        if (!table) { return; }
+        var colIndex = parseInt(th.getAttribute("data-col"), 10);
+        var sortType = th.getAttribute("data-sort") || "text";
+        sortTable(table, th, colIndex, sortType);
+      });
+    });
+
+    var filterSelects = document.querySelectorAll("select.table-filter");
+    Array.prototype.forEach.call(filterSelects, function (sel) {
+      sel.addEventListener("change", function () {
+        applyFilters(sel.getAttribute("data-filter-table"));
+      });
+    });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
+})();
 '@
 
     $html = @"
@@ -897,6 +1639,7 @@ code { background: #f3f4f6; padding: 2px 4px; }
 <style>$css</style>
 </head>
 <body>
+<button type="button" id="theme-toggle">Switch to dark mode</button>
 <h1>MDMWinsOverGP Validation Report</h1>
 <p>Computer: $(ConvertTo-HtmlEncoded $env:COMPUTERNAME)<br>
 Generated: $(ConvertTo-HtmlEncoded (Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz'))</p>
@@ -917,11 +1660,14 @@ $(Convert-ObjectsToHtmlTable -Rows @($ConflictState) -Properties @(
     'MDMWinsOverGP_ProviderSet','MDMWinsOverGP_WinningProvider','Interpretation'
 ))
 
-<h2>Verified mapping results</h2>
+<h2>Applied GPO settings and CSP mapping status</h2>
+<p>Every GPO setting GPResult reported as applied on this device, left-joined to the optional mapping CSV and to MDM evidence. Most rows are expected to show "No known CSP mapping" - that reflects real Policy CSP coverage, not a collection error. Sort any column by clicking its header; filter by Status or WinningProvider below the table.</p>
 $(Convert-ObjectsToHtmlTable -Rows $VerifiedRows -Properties @(
     'GpoSetting','GpoName','GpoState','CspArea','CspPolicy',
     'MdmEffectiveValue','WinningProvider','Status','Notes'
-) -EmptyMessage 'No mapping CSV was supplied, or no mapping rows were found.')
+) -EmptyMessage 'No GPO settings were found in GPResult for this device.' `
+  -Interactive -TableId 'applied-gpo-settings-table' `
+  -FilterColumns @('Status','WinningProvider') -StatusColumn 'Status')
 
 <h2>Heuristic overlap candidates</h2>
 $(Convert-ObjectsToHtmlTable -Rows ($HeuristicRows | Select-Object -First 250) -Properties @(
@@ -930,9 +1676,12 @@ $(Convert-ObjectsToHtmlTable -Rows ($HeuristicRows | Select-Object -First 250) -
 ))
 
 <h2>Recent warnings and errors</h2>
+<p>Sortable by TimeCreated (chronological, not text) and Level (by severity rank - Critical > Error > Warning - not alphabetically).</p>
 $(Convert-ObjectsToHtmlTable -Rows ($eventErrors | Select-Object -First 250) -Properties @(
     'TimeCreated','LogName','Id','Level','Message'
-))
+) -Interactive -TableId 'recent-events-table' `
+  -ColumnSortTypes @{ TimeCreated = 'date'; Id = 'number'; Level = 'severity' } `
+  -LevelColumn 'Level')
 
 <h2>Event log configuration</h2>
 $(Convert-ObjectsToHtmlTable -Rows $LogConfiguration -Properties @(
@@ -949,6 +1698,7 @@ $(Convert-ObjectsToHtmlTable -Rows $LogConfiguration -Properties @(
 <li>Use Debug and Admin events to explain timing or application failures, not as sole proof of precedence.</li>
 <li>Move confirmed settings out of GPO targeting when the migration permits it.</li>
 </ol>
+<script>$reportScript</script>
 </body>
 </html>
 "@
@@ -966,8 +1716,21 @@ if (-not [string]::IsNullOrWhiteSpace($MappingCsv) -and -not (Test-Path -Literal
     throw "Mapping CSV not found: $MappingCsv"
 }
 
+# Resolve the effective evidence root per the central-deployment precedence
+# rules documented in the -OutputRoot/-DataRoot comment-based help: explicit
+# -OutputRoot wins outright; else -DataRoot forces "<DataRoot>\Evidence";
+# else the portable "<script folder>\Data\Evidence" is used if writable;
+# else a machine-local ProgramData fallback is used automatically. This is
+# resolved from $PSScriptRoot, never the current working directory or a
+# hardcoded absolute path, so the whole toolkit folder can be copied
+# anywhere - a network share, an Intune package cache, a USB stick - and
+# still work, whether launched interactively or from a scheduled
+# task/RMM agent with an unpredictable working directory.
+$effectiveOutputRoot = Resolve-DataRoot -ScriptRoot $PSScriptRoot -ExplicitPath $OutputRoot `
+    -DataRootOverride $DataRoot -SubFolderName 'Evidence'
+
 $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$outputFolder = Join-Path $OutputRoot "$env:COMPUTERNAME-$timestamp"
+$outputFolder = Join-Path $effectiveOutputRoot "$env:COMPUTERNAME-$timestamp"
 $folders = @{
     Root       = $outputFolder
     GPResult   = Join-Path $outputFolder 'GPResult'
@@ -979,6 +1742,21 @@ $folders = @{
 
 foreach ($folder in $folders.Values) {
     New-Item -ItemType Directory -Path $folder -Force | Out-Null
+}
+
+# Best-effort: also ensure the shared "Data\Input" convention folder exists
+# next to whichever root was chosen above, as a documented place for an
+# administrator to drop a hand-curated -MappingCsv for central deployments.
+# This is purely a documented convenience location - nothing in this script
+# reads from it automatically - so a failure to create it (e.g. the
+# ProgramData fallback path structure not existing yet in some odd way)
+# must never affect the run.
+try {
+    $inputDataFolder = Join-Path (Split-Path -Path $effectiveOutputRoot -Parent) 'Input'
+    New-Item -ItemType Directory -Path $inputDataFolder -Force -ErrorAction Stop | Out-Null
+}
+catch {
+    Write-Log -Level WARN -Message "Could not create the Data\Input convenience folder. This does not affect collection. $($_.Exception.Message)"
 }
 
 # From this point on, Write-Log also appends to Log.txt in the evidence
@@ -1132,7 +1910,43 @@ try {
         Export-Csv -LiteralPath (Join-Path $folders.Reports 'Event-881.csv') `
         -NoTypeInformation -Encoding UTF8
 
-    $mappings = @(Import-VerifiedMappings -Path $MappingCsv)
+    # -GenerateMappings: auto-generate a mapping CSV via Build-PolicyMappings.ps1
+    # and use it for this run, UNLESS the caller also supplied an explicit
+    # -MappingCsv (which always wins - logged clearly either way). This must
+    # run after GPO-Settings.csv is written (a few lines above, during
+    # GPResult collection) since the generator filters its output to exactly
+    # the GPO settings this run observed; that ordering is verified here by
+    # construction, not by convention. The entire step is non-fatal by
+    # design - Invoke-PolicyMappingsGenerator never throws outward, and the
+    # outer try/catch here is belt-and-suspenders on top of that.
+    $effectiveMappingCsv = $MappingCsv
+
+    if ($GenerateMappings) {
+        if (-not [string]::IsNullOrWhiteSpace($MappingCsv)) {
+            Write-Log -Message "-GenerateMappings was specified, but an explicit -MappingCsv ('$MappingCsv') was also supplied. The explicit -MappingCsv takes precedence for this run; Build-PolicyMappings.ps1 will not be run."
+        }
+        else {
+            Write-Log -Message 'Generating a GPO-to-CSP mapping CSV via Build-PolicyMappings.ps1 (-GenerateMappings was specified)...'
+            try {
+                $gpoSettingsCsvPath = Join-Path $folders.Reports 'GPO-Settings.csv'
+                $generatedMapping = Invoke-PolicyMappingsGenerator -ScriptRoot $PSScriptRoot `
+                    -ReportsFolder $folders.Reports -GpoSettingsCsvPath $gpoSettingsCsvPath
+
+                if ($generatedMapping) {
+                    $effectiveMappingCsv = $generatedMapping
+                    Write-Log -Message "Using the auto-generated mapping CSV for this run: '$effectiveMappingCsv'."
+                }
+                else {
+                    Write-Log -Level WARN -Message 'Build-PolicyMappings.ps1 did not produce a usable mapping CSV. Continuing without a mapping for this run.'
+                }
+            }
+            catch {
+                Write-Log -Level WARN -Message "Mapping generation step failed unexpectedly. Continuing without a mapping for this run. $($_.Exception.Message)"
+            }
+        }
+    }
+
+    $mappings = @(Import-VerifiedMappings -Path $effectiveMappingCsv)
     $verifiedRows = @(Get-VerifiedOverlapRows -Mappings $mappings -GpoRows $gpoRows -MdmRows $mdmRows)
     $heuristicRows = @(Get-HeuristicOverlapRows -GpoRows $gpoRows -MdmRows $mdmRows)
     Write-Log -Message "$($mappings.Count) verified mapping row(s) supplied; $($heuristicRows.Count) heuristic overlap candidate(s) found."
@@ -1182,7 +1996,11 @@ try {
         WindowsVersion      = [Environment]::OSVersion.VersionString
         PowerShellVersion   = $PSVersionTable.PSVersion.ToString()
         SinceHours          = $SinceHours
-        MappingCsv          = $MappingCsv
+        MappingCsvRequested = $MappingCsv
+        MappingCsvEffective = $effectiveMappingCsv
+        GenerateMappings    = [bool]$GenerateMappings
+        DataRoot            = $DataRoot
+        EffectiveOutputRoot = $effectiveOutputRoot
         DebugWasEnabled     = $debugWasEnabled
         DebugEnabledByRun   = $debugEnabledByThisRun
         OutputFolder        = $folders.Root

@@ -98,13 +98,24 @@ Example with verified mappings:
   -MappingCsv .\PolicyMappings-Sample.csv `
   -SinceHours 48
 
-Main outputs
-- Reports\MDMWinsOverGP-Validation.html
+Example that auto-generates the mapping CSV via Build-PolicyMappings.ps1
+instead of supplying one by hand (see "Chaining the two scripts" below):
+
+.\Test-MDMWinsOverGP.ps1 `
+  -EnableDebugLog `
+  -GenerateMappings `
+  -SinceHours 48
+
+Main outputs (written under `Reports\` inside the timestamped evidence
+folder for this run - see "Where data lives" below for where that folder
+itself is created)
+- Reports\MDMWinsOverGP-Validation.html (interactive, sortable/filterable, dark-mode-capable)
 - Reports\Verified-Overlap-Results.csv
 - Reports\Heuristic-Overlap-Candidates.csv
 - Reports\MDM-EffectivePolicies.csv
 - Reports\GPO-Settings.csv
 - Reports\Event-881.csv
+- Reports\PolicyMappings-Generated.csv and PolicyMappings-Generated-Filtered.csv (only written when `-GenerateMappings` was passed)
 - Events\*.evtx
 - GPResult\GPResult.html
 - GPResult\GPResult.xml
@@ -112,14 +123,84 @@ Main outputs
 - A ZIP containing the full evidence package
 
 Interpretation
-- Verified mapping: Based on rows you supplied in the mapping CSV.
+- The "Applied GPO settings and CSP mapping status" report section lists
+  *every* GPO setting GPResult reported as applied on this device - not just
+  ones with a mapping. Most rows are expected to say "No known CSP mapping";
+  that reflects real Policy CSP coverage, not a collection problem. Rows
+  with both a mapping and MDM evidence are the strongest signal ("Confirmed
+  overlap") and are what the Summary's "Verified overlaps" count reflects.
 - Heuristic candidate: Similar names only. It is not proof of a conflict.
 - WinningProvider: Reported only where PolicyManager exposes the related metadata.
 - Event 881: PolicyManager activity. It is not proof that MDM overrode GPO.
+- The HTML report's tables can be sorted by clicking a column header (click
+  again to reverse), and the "Applied GPO settings" and "Recent warnings and
+  errors" tables also support dropdown filtering / severity-ranked sorting.
+  A dark mode toggle in the top-right remembers your choice (via
+  `localStorage`) and otherwise follows your OS's light/dark preference. All
+  of this is plain, inline, offline-capable JavaScript/CSS - no external
+  files or network calls, so the report works fully offline and under a
+  strict CSP.
 
 
 [1]: https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-controlpolicyconflict?utm_source=chatgpt.com "Policy CSP - ControlPolicyConflict"
 [2]: https://learn.microsoft.com/en-us/windows/client-management/mdm-collect-logs?utm_source=chatgpt.com "Collect MDM logs"
+
+## Central deployment
+
+This toolkit is designed to be copied anywhere and run unattended - a
+network share, an Intune Win32 app, an SCCM package, or pushed by an RMM
+tool - and to work the same way whether launched interactively or from a
+scheduled task/deployment agent with an unpredictable working directory.
+
+- **No hardcoded absolute paths.** Every path both scripts use, including
+  how `Test-MDMWinsOverGP.ps1 -GenerateMappings` locates
+  `Build-PolicyMappings.ps1`, is resolved from `$PSScriptRoot` (the folder
+  the running script itself lives in), never `.\`, `Get-Location`, or a
+  hardcoded drive/UNC path. Copy the whole `MDMWinsOverGPToolKit` folder
+  anywhere and both scripts still find each other.
+- **Where data lives.** Both scripts write and read under one `Data` folder
+  next to the scripts, with purpose-named subfolders created automatically
+  on demand:
+  - `Data\Evidence\` - timestamped per-run evidence packages from
+    `Test-MDMWinsOverGP.ps1` (this replaces the previous default of
+    `%PUBLIC%\Documents\MDMWinsOverGP-Validation`).
+  - `Data\Mappings\` - the mapping CSV `Build-PolicyMappings.ps1` writes
+    when run standalone without an explicit `-OutputPath`.
+  - `Data\Input\` - a documented convenience location for a hand-curated
+    `-MappingCsv`; nothing reads from it automatically, it is just where an
+    administrator can drop one for a central deployment.
+
+  (When `Test-MDMWinsOverGP.ps1 -GenerateMappings` invokes
+  `Build-PolicyMappings.ps1` itself, the generated mapping is written
+  directly into that run's own `Reports\` folder, not into `Data\Mappings\`
+  - see "Chaining the two scripts" below.)
+- **Read-only/locked script folders (the common central-deployment case).**
+  A UNC share, an Intune package cache, or a signed/locked deployment folder
+  is very often not writable. Both scripts probe `Data\` for writability at
+  startup (create the folder / write a temp file, catch failure) before
+  using it. If it is not writable, they automatically fall back to a
+  machine-local location under `$env:ProgramData\MDMWinsOverGP\Data`, which
+  is normally writable even running as SYSTEM, and log clearly at INFO which
+  root was chosen and why. An administrator can also force an explicit
+  location for either script with `-DataRoot '\\server\share\...'` (or any
+  local/UNC path); `-DataRoot` itself is always overridden by a more
+  specific explicit path (`-OutputRoot` / `-OutputPath`) if one is also
+  supplied.
+- **UNC paths** work throughout - both scripts use `Join-Path` rather than
+  string concatenation and `-LiteralPath` on every cmdlet that reads/writes
+  a path, so a path like `\\fileserver\share\MDMWinsOverGP` behaves the same
+  as a local path.
+- **No interactive prompts.** Neither script prompts for input; both are
+  safe to run as SYSTEM via a deployment tool. `gpupdate /force` (via
+  `-RunGpUpdate`) is the one place Windows itself can normally show an
+  interactive "log off now? (Y/N)" prompt - `Invoke-GpUpdate` defuses this
+  by redirecting `gpupdate`'s stdin from a file of `N` answers (not the
+  console), which holds under a non-interactive SYSTEM context exactly as it
+  does interactively, plus a hard timeout as a second guarantee.
+- **No network/external dependencies at runtime.** The generated HTML
+  report's sorting/filtering/dark-mode behavior is 100% inline, vanilla
+  JavaScript and CSS - no CDN links, no external files - so the whole
+  toolkit works on an isolated/air-gapped machine.
 
 ## Build-PolicyMappings.ps1 (auto-generating the mapping CSV)
 
@@ -189,9 +270,13 @@ from the device the script is running on.
 
    If **both** are true, this is live, on-device proof that the two
    settings are the same enforced thing right now, and the row is promoted
-   to **Tier A (device-corroborated)** - the strongest result this script
-   can produce. The concrete evidence (registry paths, values, and the
-   `_WinningProvider` value if present) is recorded in the `Notes` column.
+   to **Tier A (device-corroborated)** via the `BothConfigured` path - the
+   strongest result this script can produce. A **second, independent path**
+   can also promote a row to Tier A even when the GPO side is absent - see
+   "Confidence tiers, in plain terms" below for the full rationale
+   (`MdmWinningProvider`). The concrete evidence (registry paths, values,
+   and the `_WinningProvider` value if present) is recorded in the `Notes`
+   column either way, tagged with which path fired.
 
    If a Tier B match exists but corroboration is inconclusive, the row
    stays **Tier B**, and `Notes` records what corroboration was attempted
@@ -226,20 +311,79 @@ from the device the script is running on.
    (`GpoSetting,GpoName,CspArea,CspPolicy,OmaUri,Notes`), plus a console
    coverage summary: ADMX policies parsed, CSP policies found, rows per
    tier, how many Tier B rows were checked for device corroboration, how
-   many were promoted to Tier A, and what percentage of the discovered CSP
-   catalog got mapped. If `-GpoSettingsCsv` (a `GPO-Settings.csv` from a
-   prior `Test-MDMWinsOverGP.ps1` run) is supplied, it also writes a
-   second, filtered CSV containing only rows whose `GpoSetting` matches a
-   setting actually observed on that device, and reports how many of the
-   device's real GPO settings received a mapping.
+   many were promoted to Tier A **in total and broken out by which of the
+   two promotion paths fired** (`BothConfigured` vs. `MdmWinningProvider` -
+   see "Confidence tiers" below), and what percentage of the discovered CSP
+   catalog got mapped. Without an explicit `-OutputPath`, the CSV is written
+   under `Data\Mappings\` (see "Central deployment" above). If
+   `-GpoSettingsCsv` (a `GPO-Settings.csv` from a prior
+   `Test-MDMWinsOverGP.ps1` run) is supplied, it also writes a second,
+   filtered CSV containing only rows whose `GpoSetting` matches a setting
+   actually observed on that device, and reports how many of the device's
+   real GPO settings received a mapping.
+
+### Chaining the two scripts (`-GenerateMappings`)
+
+Running `Build-PolicyMappings.ps1` by hand and then feeding its output into
+`Test-MDMWinsOverGP.ps1 -MappingCsv` works, but `Test-MDMWinsOverGP.ps1
+-GenerateMappings` does it for you in one run:
+
+```powershell
+.\Test-MDMWinsOverGP.ps1 -GenerateMappings -SinceHours 48
+```
+
+- It locates `Build-PolicyMappings.ps1` next to itself (via `$PSScriptRoot`),
+  after this run's own GPResult collection has already written
+  `Reports\GPO-Settings.csv` - `Build-PolicyMappings.ps1` then filters its
+  output to exactly this device's applied GPO settings via
+  `-GpoSettingsCsv`.
+- It runs `Build-PolicyMappings.ps1` as a separate `powershell.exe -File`
+  **child process**, not dot-sourced. This is deliberate: dot-sourcing would
+  run `Build-PolicyMappings.ps1`'s own `Set-StrictMode -Version 2` session,
+  `Write-Log` function, and many script-scope variables directly inside
+  `Test-MDMWinsOverGP.ps1`'s own scope, risking a silent variable/function
+  collision in either direction (now or after a future edit to either
+  script). A child process gets a fully independent scope; its console
+  output is captured and re-logged into this run's own `Log.txt` instead.
+- The result (`Reports\PolicyMappings-Generated-Filtered.csv`, or the
+  unfiltered CSV if the filtered one wasn't produced) becomes the effective
+  `-MappingCsv` for the rest of the run.
+- If you also pass an explicit `-MappingCsv`, that always wins - the run
+  logs clearly which one was used and skips running
+  `Build-PolicyMappings.ps1` entirely.
+- The whole step is non-fatal: if `Build-PolicyMappings.ps1` can't be found
+  or the child process fails, a WARN is logged and collection continues
+  exactly as if `-GenerateMappings` had not been passed.
 
 ### Confidence tiers, in plain terms
 
 | Tier | Meaning | Trust level |
 |---|---|---|
-| A (device-corroborated) | Tier B name match AND live registry proof that both the GPO side and the MDM side are currently configured on this device | Highest - still verify against docs, but this is strong, current, on-device evidence |
+| A (device-corroborated) | Promoted via **either** of two independent paths (see below) | Highest - still verify against docs, but this is strong, current, on-device evidence |
 | B (name-only) | Exact ADMX name == CSP policy name, no (or inconclusive) device corroboration | Moderate - a common, but not universal, pattern for ADMX-backed CSP policies |
 | C (fuzzy) | Token-similarity only | Weakest - review-only, never treat as verified |
+
+**Tier A now has two independent promotion paths**, both recorded distinctly
+in `Notes` and counted separately in the console coverage summary
+(`path=BothConfigured` vs. `path=MdmWinningProvider`):
+
+1. **BothConfigured (strongest).** Live registry proof that both the GPO
+   side and the MDM side are currently configured on this device - the
+   original rule.
+2. **MdmWinningProvider (looser, suggestive).** The classic GPO registry
+   value is **absent**, but the matched CSP policy is live under
+   `PolicyManager\current\device` and its `_WinningProvider` value indicates
+   MDM currently owns it. This exists because rule 1 is partly
+   self-defeating for the exact case MDMWinsOverGP is meant to prove: when
+   MDM actually wins a real conflict, Windows blocks the Group Policy engine
+   from writing its registry value at all, so `GpoConfigured` becomes
+   **false** precisely *because* the conflict was resolved in MDM's favor -
+   rule 1 alone would then never fire for a genuinely resolved conflict.
+   **This path is suggestive of a resolved conflict, not proof by itself
+   that a GPO ever targeted this exact setting** - only rule 1 provides that
+   independent GPO-side evidence. Treat an `MdmWinningProvider` Tier A row as
+   a strong lead to confirm, not as equivalent-strength evidence to a
+   `BothConfigured` row.
 
 ### `-SkipDeviceCorroboration`
 
@@ -268,6 +412,12 @@ C) - no rows can be promoted to Tier A on that run. Device corroboration is
 
 # Feed the result into the main script
 .\Test-MDMWinsOverGP.ps1 -MappingCsv 'C:\...\PolicyMappings-Generated.csv'
+
+# Or let Test-MDMWinsOverGP.ps1 run this script for you, filtered to this device
+.\Test-MDMWinsOverGP.ps1 -GenerateMappings
+
+# Central deployment: pin the data location explicitly (network share, etc.)
+.\Build-PolicyMappings.ps1 -DataRoot '\\fileserver\share\MDMWinsOverGP'
 ```
 
 ### Caveat - read before using the output
