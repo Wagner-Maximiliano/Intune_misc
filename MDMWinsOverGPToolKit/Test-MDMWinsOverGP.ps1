@@ -364,10 +364,10 @@ function Invoke-GpResultCollection {
     $htmlPath = Join-Path $Folder 'GPResult.html'
     $textPath = Join-Path $Folder 'GPResult.txt'
 
-    & "$env:SystemRoot\System32\gpresult.exe" /x $xmlPath /f 2>&1 |
+    & "$env:SystemRoot\System32\gpresult.exe" /scope computer /x $xmlPath /f 2>&1 |
         Out-File -LiteralPath (Join-Path $Folder 'GPResult-XML-command.txt') -Encoding utf8
 
-    & "$env:SystemRoot\System32\gpresult.exe" /h $htmlPath /f 2>&1 |
+    & "$env:SystemRoot\System32\gpresult.exe" /scope computer /h $htmlPath /f 2>&1 |
         Out-File -LiteralPath (Join-Path $Folder 'GPResult-HTML-command.txt') -Encoding utf8
 
     & "$env:SystemRoot\System32\gpresult.exe" /r /scope computer 2>&1 |
