@@ -15,6 +15,13 @@
       - Verified overlaps supplied through an optional mapping CSV
       - HTML and CSV reports
 
+    Troubleshooting a run:
+      - Log.txt (in the evidence root folder) is a timestamped, leveled
+        (INFO/WARN/ERROR) record of every step the script took. Start here.
+      - Transcript.txt captures the raw PowerShell console output.
+      - COLLECTION-INCOMPLETE.txt is written only when a run fails partway
+        through, alongside a "-PARTIAL" suffix on the evidence ZIP name.
+
     Important:
       - Event 881 is treated as MDM PolicyManager activity, not proof of a GPO conflict.
       - Automatic name matching is heuristic.
@@ -79,17 +86,65 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
+# Populated once the evidence output folder exists (see the main script body
+# below). Write-Log checks this on every call so messages logged before the
+# folder is created simply go to the console, and everything after is also
+# appended to Log.txt for troubleshooting after the fact.
+$script:LogFilePath = $null
+
+function Write-Log {
+    <#
+        Centralized logging helper. Every message gets a timestamp and a
+        severity level and is written to the console (color-coded by
+        severity) and, once the evidence folder exists, appended to
+        Log.txt. Start-Transcript (used later) captures raw console
+        output verbatim, but it is not structured or easy to grep;
+        Write-Log gives troubleshooters a single, timestamped, leveled
+        record of what the script did and why.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Message,
+        [ValidateSet('INFO', 'WARN', 'ERROR', 'DEBUG')][string]$Level = 'INFO'
+    )
+
+    $line = '[{0}] [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
+
+    switch ($Level) {
+        'ERROR' { Write-Host $line -ForegroundColor Red }
+        'WARN'  { Write-Host $line -ForegroundColor Yellow }
+        'DEBUG' { Write-Verbose $Message }
+        default { Write-Host $line }
+    }
+
+    if ($script:LogFilePath) {
+        try {
+            Add-Content -LiteralPath $script:LogFilePath -Value $line -Encoding UTF8
+        }
+        catch {
+            # Logging must never be the reason the collection itself fails.
+        }
+    }
+}
+
+# Returns $true when the current process token has local Administrator
+# rights. Most of what this script does (event log export, registry reads
+# under HKLM, wevtutil, gpupdate) requires elevation, so the caller checks
+# this before doing any work rather than failing partway through.
 function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+# Strips characters that are illegal in Windows file names (e.g. from event
+# log names like ".../Debug") so a value can be safely used as a file name.
 function New-SafeFileName {
     param([Parameter(Mandatory)][string]$Name)
     return ($Name -replace '[\\/:*?"<>|]', '_')
 }
 
+# Converts a registry value of any kind (string, DWORD, multi-string,
+# binary) into a single display-friendly string for CSV/HTML output.
 function Convert-ValueToText {
     param($Value)
 
@@ -106,6 +161,11 @@ function Convert-ValueToText {
     return [string]$Value
 }
 
+# Recursively reads every value under a registry path and flattens it into
+# one row per value, tagged with a Source (MDM/GPORegistry/Provider) and an
+# optional Scope (Device or User:<SID>). Returns an empty array (never
+# throws) when the path does not exist, since "this policy area is not
+# configured on this device" is an expected, common result.
 function Get-RegistryTreeValues {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -125,7 +185,7 @@ function Get-RegistryTreeValues {
         $keys += Get-ChildItem -LiteralPath $Path -Recurse -ErrorAction SilentlyContinue
     }
     catch {
-        Write-Warning "Could not enumerate registry path $Path. $($_.Exception.Message)"
+        Write-Log -Level WARN -Message "Could not enumerate registry path '$Path'. $($_.Exception.Message)"
         return @()
     }
 
@@ -167,6 +227,10 @@ function Get-RegistryTreeValues {
     return $results.ToArray()
 }
 
+# Reads the ControlPolicyConflict registry key, which is where Windows
+# records the effective MDMWinsOverGP state and, per-value, which provider
+# (MDM or GP) currently wins. This is the single most direct piece of
+# evidence for whether MDMWinsOverGP is active on the device.
 function Get-ControlPolicyConflictState {
     $path = 'HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\ControlPolicyConflict'
     $result = [ordered]@{
@@ -199,6 +263,10 @@ function Get-ControlPolicyConflictState {
     return [pscustomobject]$result
 }
 
+# Enables or disables the DeviceManagement-Enterprise-Diagnostics-Provider
+# Debug channel via wevtutil. Throws on failure so callers can decide
+# whether that is fatal (it usually is not - see the best-effort wrapper
+# around -EnableDebugLog in the main script body).
 function Set-DmDebugLogState {
     param([Parameter(Mandatory)][bool]$Enabled)
 
@@ -211,6 +279,9 @@ function Set-DmDebugLogState {
     }
 }
 
+# Returns IsEnabled/RecordCount/size/mode for every DeviceManagement
+# diagnostics log so the report can show whether logs were actually
+# capturing data during the collection window.
 function Get-DmLogConfiguration {
     $logPattern = '*DeviceManagement-Enterprise-Diagnostics-Provider*'
     $logs = Get-WinEvent -ListLog $logPattern -ErrorAction SilentlyContinue
@@ -226,6 +297,11 @@ function Get-DmLogConfiguration {
     }
 }
 
+# For every DeviceManagement diagnostics log: exports a full EVTX copy (for
+# offline analysis in Event Viewer) and reads events since $StartTime into
+# flat rows (for the CSV/HTML report). Both the EVTX export and the event
+# read are individually best-effort per log, so one broken/empty log never
+# blocks the others.
 function Export-DmEvents {
     param(
         [Parameter(Mandatory)][string]$Folder,
@@ -243,7 +319,7 @@ function Export-DmEvents {
             & "$env:SystemRoot\System32\wevtutil.exe" epl $config.LogName $evtxPath "/ow:true" 2>&1 | Out-Null
         }
         catch {
-            Write-Warning "Could not export EVTX for $($config.LogName)."
+            Write-Log -Level WARN -Message "Could not export EVTX for '$($config.LogName)'. $($_.Exception.Message)"
         }
 
         try {
@@ -278,6 +354,9 @@ function Export-DmEvents {
     }
 }
 
+# Runs gpresult.exe three times to produce the XML (machine-parseable),
+# HTML (human review), and text (quick grep) forms of Resultant Set of
+# Policy. The XML output feeds Get-GpResultPolicyRows below.
 function Invoke-GpResultCollection {
     param([Parameter(Mandatory)][string]$Folder)
 
@@ -301,6 +380,10 @@ function Invoke-GpResultCollection {
     }
 }
 
+# Runs gpupdate /force as a best-effort refresh before collecting GPResult.
+# Guards against the two ways gpupdate can hang a session: its own async
+# /wait, and the interactive "log off now? (Y/N)" prompt some policies
+# trigger. A hard timeout guarantees the caller gets control back either way.
 function Invoke-GpUpdate {
     param(
         [Parameter(Mandatory)][string]$Folder,
@@ -331,10 +414,10 @@ function Invoke-GpUpdate {
             -RedirectStandardInput $stdinFile
 
         if ($proc.WaitForExit($TimeoutSeconds * 1000)) {
-            Write-Host "gpupdate completed with exit code $($proc.ExitCode)."
+            Write-Log -Message "gpupdate completed with exit code $($proc.ExitCode)."
         }
         else {
-            Write-Warning "gpupdate did not finish within $TimeoutSeconds seconds. Terminating it and continuing with collection."
+            Write-Log -Level WARN -Message "gpupdate did not finish within $TimeoutSeconds seconds. Terminating it and continuing with collection."
             # Process.Kill([bool]) for the whole tree is .NET Core only; on Windows
             # PowerShell 5.1 use taskkill /T to terminate gpupdate and its children.
             & "$env:SystemRoot\System32\taskkill.exe" /PID $proc.Id /T /F 2>&1 |
@@ -345,12 +428,17 @@ function Invoke-GpUpdate {
         Remove-Item -LiteralPath $stdinFile -Force -ErrorAction SilentlyContinue
     }
 
-    # Echo gpupdate's captured output into the transcript for the record.
+    # Echo gpupdate's captured output into the transcript/log for the record.
     if (Test-Path -LiteralPath $outFile) {
-        Get-Content -LiteralPath $outFile | ForEach-Object { Write-Host $_ }
+        Get-Content -LiteralPath $outFile | ForEach-Object { Write-Log -Message $_ }
     }
 }
 
+# Returns the trimmed inner text of the first matching descendant element,
+# checked in order across a list of possible element names. GPResult XML
+# uses different element names for the same concept across Windows
+# releases and policy extension types, so callers pass every known
+# synonym and take whichever is present.
 function Get-FirstNodeText {
     param(
         [Parameter(Mandatory)][System.Xml.XmlNode]$Node,
@@ -367,6 +455,10 @@ function Get-FirstNodeText {
     return ''
 }
 
+# Parses GPResult.xml into flat rows of candidate GPO-applied settings.
+# Returns an empty array (never throws) when the XML is missing or
+# unparsable, and when no Group Policy is applied that is a legitimate,
+# expected empty result rather than a failure.
 function Get-GpResultPolicyRows {
     param([Parameter(Mandatory)][string]$XmlPath)
 
@@ -378,7 +470,7 @@ function Get-GpResultPolicyRows {
         [xml]$xml = Get-Content -LiteralPath $XmlPath -Raw
     }
     catch {
-        Write-Warning "Could not parse GPResult XML. $($_.Exception.Message)"
+        Write-Log -Level WARN -Message "Could not parse GPResult XML at '$XmlPath'. $($_.Exception.Message)"
         return @()
     }
 
@@ -440,6 +532,9 @@ function Get-GpResultPolicyRows {
         Sort-Object GpoSetting, GpoName, RegistryKey, RegistryValue -Unique
 }
 
+# Lowercases, strips common policy-name verb prefixes (allow/enable/...),
+# and removes all non-alphanumeric characters. Used for a strict/loose
+# equality check when matching a GPO setting name to an MDM policy name.
 function Normalize-PolicyName {
     param([string]$Text)
 
@@ -451,6 +546,9 @@ function Normalize-PolicyName {
     return $normalized
 }
 
+# Splits a name/description into a sorted, de-duplicated set of lowercase
+# words (>=3 chars, stop words removed), for use as input to the Jaccard
+# similarity score below when exact/substring name matching fails.
 function Get-TokenSet {
     param([string]$Text)
 
@@ -471,6 +569,9 @@ function Get-TokenSet {
     )
 }
 
+# Jaccard similarity (intersection / union) between two token sets,
+# 0.0-1.0. Used as the fallback heuristic match score when a GPO setting
+# name and an MDM policy name are not equal or substrings of each other.
 function Get-JaccardScore {
     param(
         [string[]]$Left,
@@ -486,6 +587,10 @@ function Get-JaccardScore {
     return [math]::Round($intersection.Count / $union.Count, 3)
 }
 
+# Collapses the flat PolicyManager registry rows (one row per value,
+# including the internal *_ProviderSet and *_WinningProvider companion
+# values) into one row per effective policy, with its winning provider
+# and pre-computed name tokens attached for the overlap matching below.
 function Get-MdmPolicyRows {
     param([object[]]$RegistryRows)
 
@@ -536,6 +641,10 @@ function Get-MdmPolicyRows {
     }
 }
 
+# Loads the optional -MappingCsv of human-verified GPO-to-CSP mappings.
+# Returns an empty array when no path was given (mapping is optional); if
+# a path *was* given but does not exist, this throws so the caller fails
+# fast rather than silently reporting zero verified overlaps.
 function Import-VerifiedMappings {
     param([string]$Path)
 
@@ -558,6 +667,11 @@ function Import-VerifiedMappings {
     }
 }
 
+# For each human-verified mapping row, checks whether the GPO side and the
+# MDM side were actually observed in this run's evidence and produces a
+# report row with a plain-English status. This is the highest-confidence
+# overlap evidence the report can show (Confidence = 1), since it is based
+# on a mapping a person confirmed rather than name-similarity guessing.
 function Get-VerifiedOverlapRows {
     param(
         [object[]]$Mappings,
@@ -611,6 +725,11 @@ function Get-VerifiedOverlapRows {
     }
 }
 
+# Best-effort automatic matching between GPO settings and MDM policies by
+# name similarity (exact normalized match, substring match, then Jaccard
+# token overlap), for GPO settings that have no verified mapping. These
+# are triage candidates only - see the "Interpretation limits" note in the
+# generated report - not confirmed overlaps.
 function Get-HeuristicOverlapRows {
     param(
         [object[]]$GpoRows,
@@ -687,6 +806,12 @@ function ConvertTo-HtmlEncoded {
     return [System.Net.WebUtility]::HtmlEncode([string]$Value)
 }
 
+# Renders a collection of objects as an HTML table, one column per named
+# property, with every cell HTML-encoded to prevent broken markup or HTML
+# injection from registry/event data that happens to contain HTML-special
+# characters. Renders a friendly empty-state message instead of an empty
+# table when Rows has no items (this is common and expected, e.g. no GPO
+# settings applied, no verified mappings supplied).
 function Convert-ObjectsToHtmlTable {
     param(
         [object[]]$Rows,
@@ -709,16 +834,24 @@ function Convert-ObjectsToHtmlTable {
     return "<table><thead><tr>$header</tr></thead><tbody>$($bodyRows -join "`n")</tbody></table>"
 }
 
+# Assembles the final human-readable HTML report from every piece of
+# evidence collected by the main script body, and writes it to $Path.
 function New-HtmlReport {
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][object]$ConflictState,
-        [Parameter(Mandatory)][object[]]$LogConfiguration,
-        [Parameter(Mandatory)][object[]]$Events,
-        [Parameter(Mandatory)][object[]]$GpoRows,
-        [Parameter(Mandatory)][object[]]$MdmRows,
-        [Parameter(Mandatory)][object[]]$VerifiedRows,
-        [Parameter(Mandatory)][object[]]$HeuristicRows,
+        # AllowEmptyCollection is required alongside Mandatory here: PowerShell's
+        # parameter binder treats an empty array bound to a Mandatory array
+        # parameter as "no value supplied" and throws "Cannot bind argument to
+        # parameter '...' because it is an empty array." These rows are commonly
+        # empty on a clean device (no recent events, no overlaps found), so that
+        # is an expected input, not a caller bug.
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$LogConfiguration,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Events,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$GpoRows,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$MdmRows,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$VerifiedRows,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$HeuristicRows,
         [Parameter(Mandatory)][string]$EvidenceFolder
     )
 
@@ -841,6 +974,11 @@ foreach ($folder in $folders.Values) {
     New-Item -ItemType Directory -Path $folder -Force | Out-Null
 }
 
+# From this point on, Write-Log also appends to Log.txt in the evidence
+# folder, giving troubleshooters a structured, timestamped record that
+# survives independently of the raw transcript below.
+$script:LogFilePath = Join-Path $folders.Root 'Log.txt'
+
 $transcriptPath = Join-Path $folders.Root 'Transcript.txt'
 $transcriptStarted = $false
 try {
@@ -848,7 +986,7 @@ try {
     $transcriptStarted = $true
 }
 catch {
-    Write-Warning "Could not start a transcript. Continuing without one. $($_.Exception.Message)"
+    Write-Log -Level WARN -Message "Could not start a transcript. Continuing without one. $($_.Exception.Message)"
 }
 
 $debugWasEnabled = $false
@@ -857,7 +995,8 @@ $collectionSucceeded = $false
 $collectionError = $null
 
 try {
-    Write-Host "Collecting MDMWinsOverGP validation evidence from $env:COMPUTERNAME"
+    Write-Log -Message "Collecting MDMWinsOverGP validation evidence from $env:COMPUTERNAME"
+    Write-Log -Message "Evidence folder: $outputFolder"
 
     $initialLogs = @(Get-DmLogConfiguration)
     $debugConfig = $initialLogs |
@@ -869,7 +1008,7 @@ try {
     }
 
     if ($EnableDebugLog -and -not $debugWasEnabled) {
-        Write-Host 'Enabling DeviceManagement Debug log...'
+        Write-Log -Message 'Enabling DeviceManagement Debug log...'
         # Best effort: enabling the Debug channel can fail (access denied, the
         # channel is already enabled elsewhere, policy). That must not abort the
         # whole collection, so log the reason and carry on without it.
@@ -878,28 +1017,36 @@ try {
             $debugEnabledByThisRun = $true
         }
         catch {
-            Write-Warning "Could not enable the DeviceManagement Debug log; continuing without it. $($_.Exception.Message)"
+            Write-Log -Level WARN -Message "Could not enable the DeviceManagement Debug log; continuing without it. $($_.Exception.Message)"
         }
     }
 
     if ($RunGpUpdate) {
-        Write-Host "Running gpupdate /force (timeout ${GpUpdateTimeoutSeconds}s)..."
+        Write-Log -Message "Running gpupdate /force (timeout ${GpUpdateTimeoutSeconds}s)..."
         # Best effort: gpupdate is a convenience refresh, not core evidence. If it
         # hangs or fails it must never take the run down with it.
         try {
             Invoke-GpUpdate -Folder $folders.GPResult -TimeoutSeconds $GpUpdateTimeoutSeconds
         }
         catch {
-            Write-Warning "gpupdate step failed; continuing with collection. $($_.Exception.Message)"
+            Write-Log -Level WARN -Message "gpupdate step failed; continuing with collection. $($_.Exception.Message)"
         }
     }
 
-    Write-Host 'Collecting GPResult...'
-    $gpFiles = Invoke-GpResultCollection -Folder $folders.GPResult
+    Write-Log -Message 'Collecting GPResult...'
+    try {
+        $gpFiles = Invoke-GpResultCollection -Folder $folders.GPResult
+    }
+    catch {
+        # gpresult.exe is core evidence, so a failure here is fatal, but wrap it
+        # to make clear in the log which step failed before the run aborts.
+        throw "GPResult collection failed. $($_.Exception.Message)"
+    }
     $gpoRows = @(Get-GpResultPolicyRows -XmlPath $gpFiles.XmlPath)
+    Write-Log -Message "Parsed $($gpoRows.Count) candidate GPO setting row(s) from GPResult."
     $gpoRows | Export-Csv -LiteralPath (Join-Path $folders.Reports 'GPO-Settings.csv') -NoTypeInformation -Encoding UTF8
 
-    Write-Host 'Reading PolicyManager effective stores...'
+    Write-Log -Message 'Reading PolicyManager effective stores...'
     $mdmRegistryRows = @()
     $mdmRegistryRows += Get-RegistryTreeValues `
         -Path 'HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device' `
@@ -919,12 +1066,13 @@ try {
         -NoTypeInformation -Encoding UTF8
 
     $mdmRows = @(Get-MdmPolicyRows -RegistryRows $mdmRegistryRows)
+    Write-Log -Message "Found $($mdmRows.Count) effective PolicyManager policy row(s)."
     $mdmRows |
         Select-Object Scope,Area,Policy,ValueName,EffectiveValue,RegistryPath,ProviderSet,WinningProvider |
         Export-Csv -LiteralPath (Join-Path $folders.Reports 'MDM-EffectivePolicies.csv') `
         -NoTypeInformation -Encoding UTF8
 
-    Write-Host 'Exporting classic registry policy trees...'
+    Write-Log -Message 'Exporting classic registry policy trees...'
     $gpoRegistryRows = @()
     $gpoRegistryRows += Get-RegistryTreeValues `
         -Path 'HKLM:\SOFTWARE\Policies' -Source GPORegistry -Scope Device
@@ -935,27 +1083,36 @@ try {
         Export-Csv -LiteralPath (Join-Path $folders.Registry 'ClassicPolicyRegistry.csv') `
         -NoTypeInformation -Encoding UTF8
 
-    Write-Host 'Reading MDMWinsOverGP state...'
+    Write-Log -Message 'Reading MDMWinsOverGP state...'
     $conflictState = Get-ControlPolicyConflictState
+    Write-Log -Message "MDMWinsOverGP interpretation: $($conflictState.Interpretation)"
     $conflictState |
         Export-Csv -LiteralPath (Join-Path $folders.Reports 'MDMWinsOverGP-State.csv') `
         -NoTypeInformation -Encoding UTF8
 
     if (-not $SkipMdmDiagnostics) {
-        Write-Host 'Running MdmDiagnosticsTool.exe...'
+        Write-Log -Message 'Running MdmDiagnosticsTool.exe...'
         $mdmTool = Join-Path $env:SystemRoot 'System32\MdmDiagnosticsTool.exe'
         if (Test-Path -LiteralPath $mdmTool) {
-            & $mdmTool -out $folders.MDM 2>&1 |
-                Out-File -LiteralPath (Join-Path $folders.MDM 'MdmDiagnosticsTool-command.txt') -Encoding UTF8
+            # Best effort: MdmDiagnosticsTool.exe is supplementary evidence. A
+            # failure here should not abort a collection that otherwise succeeded.
+            try {
+                & $mdmTool -out $folders.MDM 2>&1 |
+                    Out-File -LiteralPath (Join-Path $folders.MDM 'MdmDiagnosticsTool-command.txt') -Encoding UTF8
+            }
+            catch {
+                Write-Log -Level WARN -Message "MdmDiagnosticsTool.exe failed; continuing without it. $($_.Exception.Message)"
+            }
         }
         else {
-            Write-Warning 'MdmDiagnosticsTool.exe was not found.'
+            Write-Log -Level WARN -Message 'MdmDiagnosticsTool.exe was not found.'
         }
     }
 
-    Write-Host 'Exporting DeviceManagement event logs...'
+    Write-Log -Message 'Exporting DeviceManagement event logs...'
     $startTime = (Get-Date).AddHours(-$SinceHours)
     $dmEvidence = Export-DmEvents -Folder $folders.Events -StartTime $startTime
+    Write-Log -Message "Collected $($dmEvidence.Events.Count) DeviceManagement event(s) since $($startTime.ToString('o'))."
     $dmEvidence.Configuration |
         Export-Csv -LiteralPath (Join-Path $folders.Reports 'EventLog-Configuration.csv') `
         -NoTypeInformation -Encoding UTF8
@@ -971,6 +1128,7 @@ try {
     $mappings = @(Import-VerifiedMappings -Path $MappingCsv)
     $verifiedRows = @(Get-VerifiedOverlapRows -Mappings $mappings -GpoRows $gpoRows -MdmRows $mdmRows)
     $heuristicRows = @(Get-HeuristicOverlapRows -GpoRows $gpoRows -MdmRows $mdmRows)
+    Write-Log -Message "$($mappings.Count) verified mapping row(s) supplied; $($heuristicRows.Count) heuristic overlap candidate(s) found."
 
     $verifiedRows |
         Export-Csv -LiteralPath (Join-Path $folders.Reports 'Verified-Overlap-Results.csv') `
@@ -991,17 +1149,25 @@ try {
         }
     ) | Export-Csv -LiteralPath $templatePath -NoTypeInformation -Encoding UTF8
 
+    Write-Log -Message 'Generating HTML report...'
     $reportPath = Join-Path $folders.Reports 'MDMWinsOverGP-Validation.html'
-    New-HtmlReport `
-        -Path $reportPath `
-        -ConflictState $conflictState `
-        -LogConfiguration $dmEvidence.Configuration `
-        -Events $dmEvidence.Events `
-        -GpoRows $gpoRows `
-        -MdmRows $mdmRows `
-        -VerifiedRows $verifiedRows `
-        -HeuristicRows $heuristicRows `
-        -EvidenceFolder $folders.Root
+    try {
+        New-HtmlReport `
+            -Path $reportPath `
+            -ConflictState $conflictState `
+            -LogConfiguration $dmEvidence.Configuration `
+            -Events $dmEvidence.Events `
+            -GpoRows $gpoRows `
+            -MdmRows $mdmRows `
+            -VerifiedRows $verifiedRows `
+            -HeuristicRows $heuristicRows `
+            -EvidenceFolder $folders.Root
+    }
+    catch {
+        # The CSVs above are already on disk at this point, so a report-rendering
+        # failure should still surface clearly rather than as a generic error.
+        throw "HTML report generation failed. The CSV evidence in '$($folders.Reports)' is still valid. $($_.Exception.Message)"
+    }
 
     $manifest = [ordered]@{
         ComputerName        = $env:COMPUTERNAME
@@ -1026,24 +1192,27 @@ try {
     # partial one salvaged after a failure.
     $collectionSucceeded = $true
 
-    Write-Host ''
-    Write-Host 'Collection completed.'
-    Write-Host "HTML report: $reportPath"
+    Write-Log -Message 'Collection completed.'
+    Write-Log -Message "HTML report: $reportPath"
 }
 catch {
-    # Preserve the failure for the manifest/marker below, then re-throw so the
-    # run still surfaces the error to the caller exactly as before.
+    # Preserve the failure for the manifest/marker below, and log it with full
+    # command/position context (not just the message) so troubleshooting a
+    # failed run does not require reproducing it. Then re-throw so the run
+    # still surfaces the error to the caller exactly as before.
     $collectionError = $_
+    Write-Log -Level ERROR -Message "Collection failed: $($_.Exception.Message)"
+    Write-Log -Level ERROR -Message "At: $($_.InvocationInfo.PositionMessage)"
     throw
 }
 finally {
     if ($DisableDebugLogAfterCollection -and $debugEnabledByThisRun) {
         try {
-            Write-Host 'Disabling DeviceManagement Debug log...'
+            Write-Log -Message 'Disabling DeviceManagement Debug log...'
             Set-DmDebugLogState -Enabled $false
         }
         catch {
-            Write-Warning "Could not disable the Debug log. $($_.Exception.Message)"
+            Write-Log -Level WARN -Message "Could not disable the Debug log. $($_.Exception.Message)"
         }
     }
 
@@ -1061,6 +1230,7 @@ finally {
                 "Timestamp: $((Get-Date).ToString('o'))"
                 "Error: $errorText"
                 'This package was salvaged after a failure and may be missing evidence.'
+                'See Log.txt and Transcript.txt in this folder for full troubleshooting detail.'
             ) | Set-Content -LiteralPath (Join-Path $outputFolder 'COLLECTION-INCOMPLETE.txt') -Encoding UTF8
         }
         catch { }
@@ -1078,14 +1248,14 @@ finally {
         try {
             Compress-Archive -Path (Join-Path $outputFolder '*') -DestinationPath $zipPath -Force
             if ($collectionSucceeded) {
-                Write-Host "Evidence ZIP: $zipPath"
+                Write-Log -Message "Evidence ZIP: $zipPath"
             }
             else {
-                Write-Warning "Collection did not complete. Partial evidence ZIP: $zipPath"
+                Write-Log -Level WARN -Message "Collection did not complete. Partial evidence ZIP: $zipPath"
             }
         }
         catch {
-            Write-Warning "Could not create evidence ZIP. The evidence folder is still available at $outputFolder. $($_.Exception.Message)"
+            Write-Log -Level WARN -Message "Could not create evidence ZIP. The evidence folder is still available at $outputFolder. $($_.Exception.Message)"
         }
     }
 }
