@@ -106,6 +106,35 @@ change it — and if they do, update `DECISIONS.md`.
 
 ---
 
+## Delegating work
+
+The orchestrator plans, reasons, and verifies; Sonnet and Haiku do the bulk
+reading and writing (see "Delegation model" in `CLAUDE.md`). Two failure
+modes account for most of what goes wrong here:
+
+1. **Subagents start cold.** They have zero context. Every delegation prompt
+   must be fully self-contained: the absolute file paths, the branch, what to
+   change, what NOT to touch, and whether to commit. Critically — any prompt
+   that involves writing PowerShell **must restate this repo's StrictMode
+   rules inline**: the `.Count`-on-`$null` trap, `[AllowEmptyCollection()]`
+   on `Mandatory` array params, and never shadowing automatic variables like
+   `$Event`. A subagent that hasn't been told will reintroduce these bugs —
+   this has already happened repeatedly in this project's history.
+
+2. **Never relay a subagent's report as fact.** Verify before accepting.
+   There is no PowerShell interpreter here, so verification means
+   independently checking the actual files: brace/paren balance, tracing
+   every `.Count` back to an `@(...)` assignment, and confirming the change
+   is actually present in the file. In this project's history, subagents
+   have both self-reported introducing bugs *and* had bugs the orchestrator
+   found independently that the subagent never mentioned.
+
+If a running agent needs a correction mid-task, use `SendMessage` to it
+rather than spawning a second agent onto the same files — two agents editing
+one file will conflict.
+
+---
+
 ## Before you finish — the handover checklist
 
 Do all of this **before** your final message, in the same commit as your work:

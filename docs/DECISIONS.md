@@ -214,3 +214,22 @@ starts to bite; don't pre-empt it.
 **Rejected.** *Single admin with multi-user-ready schema* (recommended, but
 declined); *full multi-user from day one* (significant work before the tool
 does anything useful).
+
+---
+
+## D-010 — Orchestrator/delegate split for agent work
+
+- **Date**: 2026-07-28
+- **Status**: Decided (by user)
+
+**Decision.** A high-reasoning model orchestrates, plans, and verifies;
+Sonnet and Haiku do bulk reading and writing. Details in `CLAUDE.md`.
+
+**Why.** Cost and context efficiency. The orchestrator's context stays
+focused on architecture and verification instead of being consumed by file
+contents. Reviewing work is cheaper than producing it, and this project's
+real failure mode has been unverified changes reaching production — an
+explicit verification step addresses that directly.
+
+**Rejected.** *Orchestrator does everything itself* (simpler, but burns the
+expensive model's context on mechanical work and compacts sessions faster).

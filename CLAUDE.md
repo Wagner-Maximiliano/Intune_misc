@@ -29,6 +29,25 @@ Quick map:
 
 ---
 
+## Delegation model
+
+The top-level agent's job is to orchestrate, reason, verify, and plan — not
+to do bulk reading and writing itself.
+
+- **Delegate to Sonnet**: bulk file reading, code writing and editing,
+  mechanical refactors, documentation writing, multi-file sweeps.
+- **Delegate to Haiku**: cheap recon — file inventories, grep/search sweeps,
+  "does X exist" checks, format/balance checks.
+- **Keep for the orchestrator**: architectural decisions, reviewing delegated
+  output, deciding what to do next, and all final communication with the
+  user.
+
+This is a tradeoff, not a law. For a genuinely trivial single-line edit,
+spawning an agent can cost more than it saves. Use judgement — the rule is
+about heavy work, not absolute.
+
+---
+
 ## PowerShell conventions
 
 Every script uses `Set-StrictMode -Version 2.0`. The rules below are not
