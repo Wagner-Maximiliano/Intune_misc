@@ -1,0 +1,1491 @@
+<title>Continuum — Console</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  /* ============================================================
+     Continuum design-system tokens — copied verbatim.
+     ============================================================ */
+  :root {
+    color-scheme: light dark;
+
+    /* Ground + neutrals: blue-biased, never pure grey */
+    --bg:            #F6F8FB;
+    --surface:       #FFFFFF;
+    --surface-2:     #EDF1F6;
+    --border:        #D6DEE8;
+    --text:          #16202E;
+    --text-muted:    #5A6B80;
+
+    /* The two poles of the continuum */
+    --gpo:           #5B7A99;   /* legacy / on-prem Group Policy */
+    --mdm:           #17A398;   /* cloud / Intune MDM  (also the accent) */
+    --accent:        #17A398;
+    --accent-weak:   #D6F0EC;
+
+    /* Four semantic states, matching exit codes 0/1/2/3 */
+    --ok:            #2E8B57;   /* 0 clean            */
+    --fatal:         #C4453C;   /* 1 fatal            */
+    --conflict:      #C77A15;   /* 2 conflicts found  */
+    --degraded:      #7A8699;   /* 3 couldn't tell    */
+    --ok-bg:         #E4F2EA;
+    --fatal-bg:      #FAE6E4;
+    --conflict-bg:   #FBEEDA;
+    --degraded-bg:   #E9EDF2;
+
+    --radius:        8px;
+    --shadow:        0 1px 2px rgba(22,32,46,.06), 0 4px 12px rgba(22,32,46,.05);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:          #0D141E;
+      --surface:     #141D2A;
+      --surface-2:   #1B2634;
+      --border:      #2A3747;
+      --text:        #E6EDF6;
+      --text-muted:  #93A3B8;
+      --gpo:         #7E9CBB;
+      --mdm:         #2ECEC0;
+      --accent:      #2ECEC0;
+      --accent-weak: #123832;
+      --ok:          #4FB37B;
+      --fatal:       #E4685E;
+      --conflict:    #E0A040;
+      --degraded:    #8B99AD;
+      --ok-bg:       #12301F;
+      --fatal-bg:    #351A18;
+      --conflict-bg: #33260F;
+      --degraded-bg: #1E2733;
+      --shadow:      0 1px 2px rgba(0,0,0,.4), 0 4px 14px rgba(0,0,0,.3);
+    }
+  }
+
+  /* The viewer's toggle stamps data-theme on :root and MUST win both ways. */
+  :root[data-theme="light"] {
+    --bg:            #F6F8FB;
+    --surface:       #FFFFFF;
+    --surface-2:     #EDF1F6;
+    --border:        #D6DEE8;
+    --text:          #16202E;
+    --text-muted:    #5A6B80;
+    --gpo:           #5B7A99;
+    --mdm:           #17A398;
+    --accent:        #17A398;
+    --accent-weak:   #D6F0EC;
+    --ok:            #2E8B57;
+    --fatal:         #C4453C;
+    --conflict:      #C77A15;
+    --degraded:      #7A8699;
+    --ok-bg:         #E4F2EA;
+    --fatal-bg:      #FAE6E4;
+    --conflict-bg:   #FBEEDA;
+    --degraded-bg:   #E9EDF2;
+    --shadow:        0 1px 2px rgba(22,32,46,.06), 0 4px 12px rgba(22,32,46,.05);
+  }
+
+  :root[data-theme="dark"] {
+    --bg:          #0D141E;
+    --surface:     #141D2A;
+    --surface-2:   #1B2634;
+    --border:      #2A3747;
+    --text:        #E6EDF6;
+    --text-muted:  #93A3B8;
+    --gpo:         #7E9CBB;
+    --mdm:         #2ECEC0;
+    --accent:      #2ECEC0;
+    --accent-weak: #123832;
+    --ok:          #4FB37B;
+    --fatal:       #E4685E;
+    --conflict:    #E0A040;
+    --degraded:    #8B99AD;
+    --ok-bg:       #12301F;
+    --fatal-bg:    #351A18;
+    --conflict-bg: #33260F;
+    --degraded-bg: #1E2733;
+    --shadow:      0 1px 2px rgba(0,0,0,.4), 0 4px 14px rgba(0,0,0,.3);
+  }
+
+  /* ============================================================
+     Reset + base
+     ============================================================ */
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+    font-weight: 400;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+  }
+  h1, h2, h3, h4 {
+    font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system, sans-serif;
+    font-weight: 600;
+    text-wrap: balance;
+    margin: 0;
+    color: var(--text);
+  }
+  p { margin: 0; }
+  ul { margin: 0; padding: 0; list-style: none; }
+  button { font: inherit; color: inherit; }
+  table { border-collapse: collapse; width: 100%; }
+  a { color: var(--accent); }
+  code, .mono {
+    font-family: "Cascadia Code", "Cascadia Mono", Consolas, ui-monospace, monospace;
+  }
+  .tnum { font-variant-numeric: tabular-nums; }
+  .eyebrow {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: var(--text-muted);
+    font-weight: 600;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      transition: none !important;
+      animation: none !important;
+    }
+  }
+
+  /* ============================================================
+     Shell layout
+     ============================================================ */
+  .mockup-banner {
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 12px;
+    text-align: center;
+    padding: 6px 12px;
+  }
+  .mockup-banner strong { color: var(--text); }
+
+  .app-shell {
+    display: grid;
+    grid-template-columns: 240px 1fr;
+    min-height: calc(100vh - 29px);
+  }
+
+  .sidebar {
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+    padding: 20px 14px;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 8px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .brand-mark {
+    width: 26px; height: 26px;
+    flex: none;
+  }
+  .brand-name {
+    font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+    font-weight: 700;
+    font-size: 17px;
+    letter-spacing: -0.02em;
+  }
+
+  .nav-list { display: flex; flex-direction: column; gap: 2px; }
+  .nav-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    text-align: left;
+    padding: 9px 10px;
+    border-radius: var(--radius);
+    background: transparent;
+    border: 1px solid transparent;
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 14px;
+    font-weight: 400;
+  }
+  .nav-item svg { flex: none; width: 17px; height: 17px; }
+  .nav-item:hover { background: var(--surface-2); color: var(--text); }
+  .nav-item.active {
+    background: var(--accent-weak);
+    color: var(--text);
+    font-weight: 600;
+    border-color: var(--border);
+  }
+  .nav-item.active svg { color: var(--accent); }
+
+  .sidebar-footer {
+    margin-top: auto;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 1.5;
+  }
+
+  .main {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 16px 28px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    flex-wrap: wrap;
+  }
+  .topbar-left { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .topbar-title { font-size: 20px; }
+  .topbar-tenant { color: var(--text-muted); font-size: 13px; }
+  .topbar-right { display: flex; align-items: center; gap: 10px; }
+
+  .content {
+    padding: 24px 28px 48px;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+    max-width: 1400px;
+    width: 100%;
+  }
+
+  .panel[hidden] { display: none; }
+
+  /* ============================================================
+     Buttons
+     ============================================================ */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+    transition: background-color .15s ease, border-color .15s ease;
+  }
+  .btn:hover { background: var(--surface-2); }
+  .btn svg { width: 15px; height: 15px; flex: none; }
+  .btn-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #062420;
+  }
+  .btn-primary:hover { filter: brightness(1.06); }
+  .btn-ghost { border-color: transparent; background: transparent; }
+  .btn-ghost:hover { background: var(--surface-2); }
+  .btn-sm { padding: 5px 10px; font-size: 12px; }
+  .icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px; height: 34px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--surface);
+    cursor: pointer;
+  }
+  .icon-btn:hover { background: var(--surface-2); }
+  .icon-btn svg { width: 17px; height: 17px; }
+
+  /* ============================================================
+     Cards / surfaces
+     ============================================================ */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 18px 20px;
+  }
+  .card-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+  }
+  .card-header h2 { font-size: 15px; }
+  .card-subtitle { color: var(--text-muted); font-size: 12.5px; margin-top: 2px; }
+
+  /* ============================================================
+     Stat tiles
+     ============================================================ */
+  .stat-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 14px;
+  }
+  .stat-tile {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 16px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .stat-tile.tile-conflict { border-left-color: var(--conflict); }
+  .stat-tile.tile-degraded { border-left-color: var(--degraded); }
+  .stat-tile .stat-number { font-size: 30px; font-weight: 700; letter-spacing: -0.02em; }
+  .stat-tile.tile-conflict .stat-number { color: var(--conflict); }
+  .stat-tile.tile-degraded .stat-number { color: var(--degraded); }
+  .stat-tile .stat-label { font-size: 13px; color: var(--text-muted); }
+  .stat-tile .stat-delta { font-size: 12px; color: var(--text-muted); }
+
+  /* ============================================================
+     Migration continuum visualisation
+     ============================================================ */
+  .continuum-poles {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+  .pole-gpo { color: var(--gpo); }
+  .pole-mdm { color: var(--mdm); }
+  .wave-row {
+    display: grid;
+    grid-template-columns: 170px 1fr;
+    align-items: center;
+    gap: 14px;
+    padding: 10px 0;
+    border-top: 1px solid var(--border);
+  }
+  .wave-row:first-of-type { border-top: none; }
+  .wave-label { font-size: 12.5px; }
+  .wave-label .wave-name { font-weight: 600; display: block; }
+  .wave-label .wave-count { color: var(--text-muted); font-size: 11.5px; }
+  .wave-track-wrap { display: flex; flex-direction: column; gap: 4px; }
+  .wave-caption { font-size: 11px; color: var(--text-muted); }
+  svg text { font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; }
+
+  /* ============================================================
+     Outcome segmented bar
+     ============================================================ */
+  .segbar {
+    display: flex;
+    height: 22px;
+    border-radius: 999px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  .segbar > span { height: 100%; }
+  .seg-ok { background: var(--ok); }
+  .seg-conflict { background: var(--conflict); }
+  .seg-degraded { background: var(--degraded); }
+  .seg-fatal { background: var(--fatal); }
+  .seg-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    margin-top: 12px;
+    font-size: 12.5px;
+  }
+  .seg-legend-item { display: flex; align-items: center; gap: 6px; }
+  .seg-swatch { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+
+  /* ============================================================
+     Activity list
+     ============================================================ */
+  .activity-list { display: flex; flex-direction: column; }
+  .activity-item {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 10px 0;
+    border-top: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .activity-item:first-child { border-top: none; padding-top: 2px; }
+  .activity-text { min-width: 0; }
+  .activity-time { color: var(--text-muted); font-size: 12px; white-space: nowrap; flex: none; }
+
+  .dashboard-grid {
+    display: grid;
+    grid-template-columns: 1.4fr 1fr;
+    gap: 18px;
+    align-items: start;
+  }
+  .dashboard-grid .card.span-full { grid-column: 1 / -1; }
+
+  /* ============================================================
+     Status pill
+     ============================================================ */
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 10px 3px 8px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid transparent;
+    white-space: nowrap;
+  }
+  .pill::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex: none;
+  }
+  .pill-ok { background: var(--ok-bg); color: var(--ok); }
+  .pill-ok::before { background: var(--ok); }
+  .pill-conflict { background: var(--conflict-bg); color: var(--conflict); }
+  .pill-conflict::before { background: var(--conflict); }
+  .pill-degraded { background: var(--degraded-bg); color: var(--degraded); }
+  .pill-degraded::before { background: var(--degraded); }
+  .pill-fatal { background: var(--fatal-bg); color: var(--fatal); }
+  .pill-fatal::before { background: var(--fatal); }
+  .pill-running { background: var(--accent-weak); color: var(--accent); }
+  .pill-running::before { background: var(--accent); }
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    border: 1px dashed var(--border);
+    color: var(--text-muted);
+    background: var(--surface-2);
+  }
+  .chip-planned {
+    border-style: solid;
+    color: var(--gpo);
+    background: var(--surface-2);
+  }
+
+  /* ============================================================
+     Tables
+     ============================================================ */
+  .table-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius); }
+  table.data-table { min-width: 640px; }
+  .data-table th, .data-table td {
+    padding: 10px 14px;
+    text-align: left;
+    font-size: 13.5px;
+    border-bottom: 1px solid var(--border);
+  }
+  .data-table th {
+    background: var(--surface-2);
+    color: var(--text-muted);
+    font-size: 11.5px;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    font-weight: 600;
+    position: sticky;
+    top: 0;
+  }
+  .data-table tbody tr:last-child td { border-bottom: none; }
+  .data-table tbody tr.row-clickable { cursor: pointer; }
+  .data-table tbody tr.row-clickable:hover { background: var(--surface-2); }
+  .data-table tbody tr.row-selected { background: var(--accent-weak); }
+
+  /* ============================================================
+     Filter bar
+     ============================================================ */
+  .filter-bar {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-bottom: 14px;
+  }
+  .search-input, .select-input {
+    padding: 8px 12px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    font-size: 13.5px;
+  }
+  .search-input { flex: 1 1 240px; min-width: 180px; }
+  .search-input::placeholder { color: var(--text-muted); }
+
+  /* ============================================================
+     Device detail (cross-tool view)
+     ============================================================ */
+  .device-detail-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    margin-bottom: 18px;
+  }
+  .device-detail-header h2 { font-size: 18px; }
+  .device-meta {
+    display: flex;
+    gap: 18px;
+    flex-wrap: wrap;
+    color: var(--text-muted);
+    font-size: 12.5px;
+    margin-top: 4px;
+  }
+  .device-meta .mono { color: var(--text); }
+
+  .evidence-columns {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    align-items: start;
+  }
+  .evidence-col {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    background: var(--surface);
+  }
+  .evidence-col.tier-inference {
+    border-style: dashed;
+    background: var(--surface-2);
+  }
+  .evidence-col-head { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+  .evidence-col-head h3 { font-size: 14px; }
+  .evidence-label {
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    width: fit-content;
+    padding: 2px 8px;
+    border-radius: 999px;
+  }
+  .evidence-label.authoritative { color: var(--mdm); background: var(--accent-weak); }
+  .evidence-label.inference { color: var(--text-muted); background: var(--surface); border: 1px dashed var(--border); }
+
+  .mini-table th, .mini-table td { padding: 7px 8px; font-size: 12.5px; }
+  .tier-chip {
+    font-size: 10.5px;
+    font-weight: 700;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+  }
+
+  .timeline { display: flex; flex-direction: column; }
+  .timeline-item {
+    display: grid;
+    grid-template-columns: 110px 1fr;
+    gap: 12px;
+    padding: 9px 0;
+    border-top: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .timeline-item:first-child { border-top: none; }
+  .timeline-date { color: var(--text-muted); font-size: 12px; }
+
+  /* ============================================================
+     Tools panel
+     ============================================================ */
+  .tools-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 18px;
+  }
+  .tool-list { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; font-size: 13px; }
+  .tool-list li { display: flex; gap: 8px; }
+  .tool-list li svg { flex: none; width: 14px; height: 14px; margin-top: 3px; color: var(--accent); }
+  .tool-note {
+    font-size: 12px;
+    color: var(--text-muted);
+    background: var(--surface-2);
+    border-radius: var(--radius);
+    padding: 8px 10px;
+    margin: 10px 0;
+  }
+  .tool-lastrun { font-size: 12px; color: var(--text-muted); margin-bottom: 10px; }
+  .tool-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+  /* ============================================================
+     Runs panel
+     ============================================================ */
+  .run-expand-btn {
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    color: var(--text-muted);
+    display: inline-flex;
+    align-items: center;
+    padding: 2px;
+  }
+  .run-expand-btn svg { width: 14px; height: 14px; transition: transform .15s ease; }
+  tr.run-expanded .run-expand-btn svg { transform: rotate(90deg); }
+  tr.run-progress-row { display: none; }
+  tr.run-progress-row.open { display: table-row; }
+  tr.run-progress-row td { background: var(--surface-2); padding: 12px 14px 16px 40px; }
+  .progress-list { display: flex; flex-direction: column; gap: 6px; }
+  .progress-item { display: flex; align-items: center; justify-content: space-between; font-size: 12.5px; gap: 12px; }
+  .progress-state { font-size: 11.5px; font-weight: 600; }
+  .progress-state.state-complete { color: var(--ok); }
+  .progress-state.state-active { color: var(--accent); }
+  .progress-state.state-offline { color: var(--degraded); }
+
+  /* ============================================================
+     Reports panel
+     ============================================================ */
+  .reports-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 16px;
+  }
+  .report-card { display: flex; flex-direction: column; gap: 10px; }
+  .report-card h3 { font-size: 14.5px; display: flex; align-items: center; gap: 8px; }
+  .report-desc { font-size: 12.5px; color: var(--text-muted); }
+  .report-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: auto; }
+
+  /* ============================================================
+     Footer
+     ============================================================ */
+  .page-footer {
+    padding: 16px 28px 28px;
+    color: var(--text-muted);
+    font-size: 11.5px;
+    border-top: 1px solid var(--border);
+  }
+
+  /* ============================================================
+     Responsive
+     ============================================================ */
+  @media (max-width: 1100px) {
+    .stat-grid { grid-template-columns: repeat(2, 1fr); }
+    .dashboard-grid { grid-template-columns: 1fr; }
+    .tools-grid { grid-template-columns: 1fr; }
+    .reports-grid { grid-template-columns: repeat(2, 1fr); }
+    .evidence-columns { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 820px) {
+    .app-shell { grid-template-columns: 72px 1fr; }
+    .brand-name, .nav-item span.label, .sidebar-footer { display: none; }
+    .brand { justify-content: center; padding-bottom: 12px; }
+    .nav-item { justify-content: center; }
+    .topbar { padding: 14px 16px; }
+    .content { padding: 18px 16px 40px; }
+    .stat-grid { grid-template-columns: 1fr 1fr; }
+    .wave-row { grid-template-columns: 1fr; gap: 4px; }
+  }
+  @media (max-width: 560px) {
+    .stat-grid { grid-template-columns: 1fr; }
+    .reports-grid { grid-template-columns: 1fr; }
+    .topbar-right { width: 100%; justify-content: space-between; }
+  }
+</style>
+
+<div class="mockup-banner">
+  <strong>Design mockup</strong> — representative data only. Not a live system.
+</div>
+
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 26 26" fill="none" aria-hidden="true">
+        <circle cx="6" cy="20" r="4" fill="var(--gpo)"/>
+        <circle cx="20" cy="6" r="4" fill="var(--mdm)"/>
+        <line x1="9" y1="17" x2="17" y2="9" stroke="var(--border)" stroke-width="2"/>
+      </svg>
+      <span class="brand-name">Continuum</span>
+    </div>
+
+    <nav class="nav-list" aria-label="Primary">
+      <button class="nav-item active" data-panel="dashboard" type="button">
+        <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><rect x="2.5" y="2.5" width="6.5" height="6.5" rx="1.2" stroke="currentColor" stroke-width="1.4"/><rect x="11" y="2.5" width="6.5" height="6.5" rx="1.2" stroke="currentColor" stroke-width="1.4"/><rect x="2.5" y="11" width="6.5" height="6.5" rx="1.2" stroke="currentColor" stroke-width="1.4"/><rect x="11" y="11" width="6.5" height="6.5" rx="1.2" stroke="currentColor" stroke-width="1.4"/></svg>
+        <span class="label">Dashboard</span>
+      </button>
+      <button class="nav-item" data-panel="devices" type="button">
+        <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="10" rx="1.3" stroke="currentColor" stroke-width="1.4"/><line x1="7" y1="17" x2="13" y2="17" stroke="currentColor" stroke-width="1.4"/><line x1="10" y1="13.5" x2="10" y2="17" stroke="currentColor" stroke-width="1.4"/></svg>
+        <span class="label">Devices</span>
+      </button>
+      <button class="nav-item" data-panel="tools" type="button">
+        <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M12 3.5a3.6 3.6 0 0 0-4.9 4l-5 5 2 2 5-5a3.6 3.6 0 0 0 4-4.9l-2 2-1.6-.4-.4-1.6 2-2Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+        <span class="label">Tools</span>
+      </button>
+      <button class="nav-item" data-panel="runs" type="button">
+        <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.4"/><path d="M8.3 7.2 12.7 10l-4.4 2.8Z" fill="currentColor"/></svg>
+        <span class="label">Runs</span>
+      </button>
+      <button class="nav-item" data-panel="reports" type="button">
+        <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M5 2.5h7l3 3V17a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><line x1="5.8" y1="9" x2="12.2" y2="9" stroke="currentColor" stroke-width="1.2"/><line x1="5.8" y1="12" x2="12.2" y2="12" stroke="currentColor" stroke-width="1.2"/></svg>
+        <span class="label">Reports</span>
+      </button>
+    </nav>
+
+    <div class="sidebar-footer">
+      Management server · localhost only · single admin
+    </div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <div class="topbar-left">
+        <h1 class="topbar-title" id="topbarTitle">Dashboard</h1>
+        <div class="topbar-tenant mono">contoso.onmicrosoft.com</div>
+      </div>
+      <div class="topbar-right">
+        <button class="btn btn-primary" type="button">
+          <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="10" cy="10" r="7" stroke="#062420" stroke-width="1.4"/><path d="M8.3 7.2 12.7 10l-4.4 2.8Z" fill="#062420"/></svg>
+          Run fleet check
+        </button>
+        <button class="icon-btn" id="themeToggle" type="button" aria-label="Toggle color theme" title="Toggle color theme">
+          <svg id="themeIconSun" viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="10" cy="10" r="3.6" stroke="currentColor" stroke-width="1.4"/><g stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><line x1="10" y1="1.6" x2="10" y2="3.4"/><line x1="10" y1="16.6" x2="10" y2="18.4"/><line x1="1.6" y1="10" x2="3.4" y2="10"/><line x1="16.6" y1="10" x2="18.4" y2="10"/><line x1="4.2" y1="4.2" x2="5.5" y2="5.5"/><line x1="14.5" y1="14.5" x2="15.8" y2="15.8"/><line x1="4.2" y1="15.8" x2="5.5" y2="14.5"/><line x1="14.5" y1="5.5" x2="15.8" y2="4.2"/></g></svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- ================= DASHBOARD ================= -->
+    <section class="panel content" id="panel-dashboard">
+      <div class="stat-grid">
+        <div class="stat-tile">
+          <div class="stat-number tnum">247</div>
+          <div class="stat-label">Devices checked</div>
+          <div class="stat-delta tnum">+6 since last run</div>
+        </div>
+        <div class="stat-tile tile-conflict">
+          <div class="stat-number tnum">38</div>
+          <div class="stat-label">Conflicts found</div>
+          <div class="stat-delta tnum">+7 since last run</div>
+        </div>
+        <div class="stat-tile tile-degraded">
+          <div class="stat-number tnum">12</div>
+          <div class="stat-label">Degraded evidence</div>
+          <div class="stat-delta tnum">+2 since last run</div>
+        </div>
+        <div class="stat-tile">
+          <div class="stat-number tnum">184</div>
+          <div class="stat-label">Policies tracked</div>
+          <div class="stat-delta tnum">+3 changed this week</div>
+        </div>
+      </div>
+
+      <div class="dashboard-grid">
+        <div class="card span-full">
+          <div class="card-header">
+            <div>
+              <h2>Migration continuum</h2>
+              <div class="card-subtitle">Where each wave sits between Group Policy and Intune MDM, by device</div>
+            </div>
+          </div>
+          <div class="continuum-poles">
+            <span class="pole-gpo">Group Policy</span>
+            <span class="pole-mdm">Intune MDM</span>
+          </div>
+          <div id="continuumWaves"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2>Fleet outcome breakdown</h2>
+              <div class="card-subtitle">Last completed fleet run · 247 devices</div>
+            </div>
+          </div>
+          <div class="segbar" role="img" aria-label="Clean 197, Conflicts 38, Degraded 12, Fatal 0">
+            <span class="seg-ok" style="width:79.8%"></span>
+            <span class="seg-conflict" style="width:15.4%"></span>
+            <span class="seg-degraded" style="width:4.8%"></span>
+            <span class="seg-fatal" style="width:0%"></span>
+          </div>
+          <div class="seg-legend">
+            <span class="seg-legend-item"><span class="seg-swatch" style="background:var(--ok)"></span>Clean <span class="tnum">197</span></span>
+            <span class="seg-legend-item"><span class="seg-swatch" style="background:var(--conflict)"></span>Conflicts <span class="tnum">38</span></span>
+            <span class="seg-legend-item"><span class="seg-swatch" style="background:var(--degraded)"></span>Degraded <span class="tnum">12</span></span>
+            <span class="seg-legend-item"><span class="seg-swatch" style="background:var(--fatal)"></span>Fatal <span class="tnum">0</span></span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2>Recent activity</h2>
+            </div>
+          </div>
+          <div class="activity-list">
+            <div class="activity-item">
+              <div class="activity-text">Fleet conflict check completed — 247 devices — 38 conflicts</div>
+              <div class="activity-time">2 hours ago</div>
+            </div>
+            <div class="activity-item">
+              <div class="activity-text">Policy backup completed — 184 policies, 3 changed</div>
+              <div class="activity-time">14 hours ago</div>
+            </div>
+            <div class="activity-item">
+              <div class="activity-text">Policy changed: <span class="mono">Windows Update ring</span> — Deferral period 7 → 14 days</div>
+              <div class="activity-time">14 hours ago</div>
+            </div>
+            <div class="activity-item">
+              <div class="activity-text">Device flagged degraded: <span class="mono">FLD-SRF-0231</span> — MDM diagnostics log unreadable</div>
+              <div class="activity-time">1 day ago</div>
+            </div>
+            <div class="activity-item">
+              <div class="activity-text">Policy backup completed — 181 policies, 1 changed</div>
+              <div class="activity-time">3 days ago</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= DEVICES ================= -->
+    <section class="panel content" id="panel-devices" hidden>
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <h2>Devices</h2>
+            <div class="card-subtitle">247 devices across 3 migration waves</div>
+          </div>
+        </div>
+
+        <div class="filter-bar">
+          <input class="search-input" type="text" id="deviceSearch" placeholder="Search by hostname or wave…" aria-label="Search devices">
+          <select class="select-input" id="deviceStatusFilter" aria-label="Filter by status">
+            <option value="">All statuses</option>
+            <option value="ok">Clean</option>
+            <option value="conflict">Conflicts found</option>
+            <option value="degraded">Degraded</option>
+          </select>
+        </div>
+
+        <div class="table-scroll">
+          <table class="data-table" id="devicesTable">
+            <thead>
+              <tr>
+                <th>Device</th>
+                <th>Wave</th>
+                <th>Last checked</th>
+                <th>Conflicts</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr class="row-clickable" data-device="FIN-WKS-0142" data-status="conflict">
+                <td class="mono">FIN-WKS-0142</td>
+                <td>Wave 2 — Finance</td>
+                <td class="tnum">2026-07-28 09:14</td>
+                <td class="tnum">7</td>
+                <td><span class="pill pill-conflict">Conflicts found</span></td>
+              </tr>
+              <tr class="row-clickable" data-device="LON-LT-0087" data-status="ok">
+                <td class="mono">LON-LT-0087</td>
+                <td>Wave 1 — Pilot</td>
+                <td class="tnum">2026-07-28 09:05</td>
+                <td class="tnum">0</td>
+                <td><span class="pill pill-ok">Clean</span></td>
+              </tr>
+              <tr class="row-clickable" data-device="FLD-SRF-0231" data-status="degraded">
+                <td class="mono">FLD-SRF-0231</td>
+                <td>Wave 3 — Field</td>
+                <td class="tnum">2026-07-28 08:58</td>
+                <td class="tnum">—</td>
+                <td><span class="pill pill-degraded">Degraded</span></td>
+              </tr>
+              <tr class="row-clickable" data-device="FLD-WKS-0198" data-status="conflict">
+                <td class="mono">FLD-WKS-0198</td>
+                <td>Wave 3 — Field</td>
+                <td class="tnum">2026-07-28 08:51</td>
+                <td class="tnum">2</td>
+                <td><span class="pill pill-conflict">Conflicts found</span></td>
+              </tr>
+              <tr class="row-clickable" data-device="FIN-WKS-0076" data-status="ok">
+                <td class="mono">FIN-WKS-0076</td>
+                <td>Wave 2 — Finance</td>
+                <td class="tnum">2026-07-28 08:47</td>
+                <td class="tnum">0</td>
+                <td><span class="pill pill-ok">Clean</span></td>
+              </tr>
+              <tr class="row-clickable" data-device="LON-LT-0014" data-status="conflict">
+                <td class="mono">LON-LT-0014</td>
+                <td>Wave 1 — Pilot</td>
+                <td class="tnum">2026-07-28 08:40</td>
+                <td class="tnum">1</td>
+                <td><span class="pill pill-conflict">Conflicts found</span></td>
+              </tr>
+              <tr class="row-clickable" data-device="FLD-SRF-0303" data-status="degraded">
+                <td class="mono">FLD-SRF-0303</td>
+                <td>Wave 3 — Field</td>
+                <td class="tnum">2026-07-28 08:33</td>
+                <td class="tnum">—</td>
+                <td><span class="pill pill-degraded">Degraded</span></td>
+              </tr>
+              <tr class="row-clickable" data-device="FIN-WKS-0155" data-status="conflict">
+                <td class="mono">FIN-WKS-0155</td>
+                <td>Wave 2 — Finance</td>
+                <td class="tnum">2026-07-28 08:29</td>
+                <td class="tnum">3</td>
+                <td><span class="pill pill-conflict">Conflicts found</span></td>
+              </tr>
+              <tr class="row-clickable" data-device="LON-DT-0002" data-status="ok">
+                <td class="mono">LON-DT-0002</td>
+                <td>Wave 1 — Pilot</td>
+                <td class="tnum">2026-07-28 08:22</td>
+                <td class="tnum">0</td>
+                <td><span class="pill pill-ok">Clean</span></td>
+              </tr>
+              <tr class="row-clickable" data-device="FLD-WKS-0410" data-status="ok">
+                <td class="mono">FLD-WKS-0410</td>
+                <td>Wave 3 — Field</td>
+                <td class="tnum">2026-07-28 08:15</td>
+                <td class="tnum">0</td>
+                <td><span class="pill pill-ok">Clean</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p id="deviceNoResults" class="card-subtitle" style="padding-top:12px; display:none;">No devices match this filter.</p>
+      </div>
+
+      <!-- Cross-tool device detail -->
+      <div class="card" id="deviceDetail" hidden>
+        <div class="device-detail-header">
+          <div>
+            <h2 id="ddHostname" class="mono">FIN-WKS-0142</h2>
+            <div class="device-meta">
+              <span>Wave: <span id="ddWave">Wave 2 — Finance</span></span>
+              <span>OS build: <span class="mono">22631.4602</span></span>
+              <span>Last checked: <span id="ddLastChecked" class="mono tnum">2026-07-28 09:14</span></span>
+            </div>
+          </div>
+          <span class="pill pill-conflict" id="ddStatusPill">Conflicts found</span>
+        </div>
+
+        <div class="evidence-columns">
+          <div class="evidence-col">
+            <div class="evidence-col-head">
+              <h3>Blocked Group Policies</h3>
+              <span class="evidence-label authoritative">
+                <svg viewBox="0 0 14 14" width="11" height="11" fill="none" aria-hidden="true"><path d="M2 7l3.3 3.3L12 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                Authoritative — reported by Windows
+              </span>
+            </div>
+            <div class="table-scroll">
+              <table class="data-table mini-table">
+                <thead><tr><th>GPO setting</th><th>Blocked by</th></tr></thead>
+                <tbody>
+                  <tr><td>Configure Automatic Updates</td><td class="mono">Update/AllowAutoUpdate</td></tr>
+                  <tr><td>Password minimum length</td><td class="mono">DeviceLock/MinDevicePasswordLength</td></tr>
+                  <tr><td>Turn off Windows Defender</td><td class="mono">Defender/AllowRealtimeMonitoring</td></tr>
+                  <tr><td>Configure Windows Hello for Business</td><td class="mono">PassportForWork/RequireSecurityDevice</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="evidence-col tier-inference">
+            <div class="evidence-col-head">
+              <h3>Heuristic overlap candidates</h3>
+              <span class="evidence-label inference">
+                <svg viewBox="0 0 14 14" width="11" height="11" fill="none" aria-hidden="true"><path d="M7 2v6M7 10.5v.1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+                Inference — name similarity, not proof
+              </span>
+            </div>
+            <div class="table-scroll">
+              <table class="data-table mini-table">
+                <thead><tr><th>GPO setting</th><th>Candidate CSP</th><th>Confidence</th></tr></thead>
+                <tbody>
+                  <tr><td>Specify intranet Microsoft update service location</td><td class="mono">Update/UpdateServiceUrl</td><td><span class="tier-chip">Tier B</span></td></tr>
+                  <tr><td>Allow log on through Remote Desktop Services</td><td class="mono">RemoteDesktopServices/AllowUsers</td><td><span class="tier-chip">Tier C</span></td></tr>
+                  <tr><td>Prevent installation of removable devices</td><td class="mono">Storage/RemovableDiskDenyWriteAccess</td><td><span class="tier-chip">Tier C</span></td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div style="margin-top:20px;">
+          <h3 style="font-size:14px; margin-bottom:10px;">Policy history for this device's assigned policies</h3>
+          <div class="timeline">
+            <div class="timeline-item">
+              <div class="timeline-date tnum">2026-07-14</div>
+              <div><span class="mono">Windows Update ring</span> · Deferral period <span class="mono">7 → 14</span> days · changed by <span class="mono">j.okafor@contoso.com</span></div>
+            </div>
+            <div class="timeline-item">
+              <div class="timeline-date tnum">2026-06-30</div>
+              <div><span class="mono">Endpoint Protection Baseline</span> · Defender/AllowRealtimeMonitoring <span class="mono">Not configured → Enabled</span> · changed by <span class="mono">a.reyes@contoso.com</span></div>
+            </div>
+            <div class="timeline-item">
+              <div class="timeline-date tnum">2026-06-02</div>
+              <div><span class="mono">Identity Protection</span> · PassportForWork/RequireSecurityDevice <span class="mono">Disabled → Enabled</span> · changed by <span class="mono">j.okafor@contoso.com</span></div>
+            </div>
+            <div class="timeline-item">
+              <div class="timeline-date tnum">2026-04-19</div>
+              <div><span class="mono">Device Lock Policy</span> · DeviceLock/MinDevicePasswordLength <span class="mono">6 → 8</span> · changed by <span class="mono">j.okafor@contoso.com</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= TOOLS ================= -->
+    <section class="panel content" id="panel-tools" hidden>
+      <div class="tools-grid">
+        <div class="card">
+          <div class="card-header"><div><h2>Policy Backup</h2><div class="card-subtitle">Snapshot, version, and restore Intune Settings Catalog policies</div></div></div>
+          <p style="font-size:13px; color:var(--text-muted);">Intune has no version history and no undo. This snapshots every policy, keeps a dated history only when content genuinely changed, and can restore from any past version.</p>
+          <ul class="tool-list">
+            <li><svg viewBox="0 0 14 14" fill="none"><path d="M2 7l3.3 3.3L12 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>JSON snapshots, one per policy per run</li>
+            <li><svg viewBox="0 0 14 14" fill="none"><path d="M2 7l3.3 3.3L12 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>Versioned Excel workbook — new sheet only on real change</li>
+            <li><svg viewBox="0 0 14 14" fill="none"><path d="M2 7l3.3 3.3L12 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>SQLite history database, additive and idempotent</li>
+          </ul>
+          <div class="tool-note">Restore is <strong>create-only</strong> — it never overwrites an existing policy, and prints original assignments for manual reapplication.</div>
+          <div class="tool-lastrun">Last run: 2026-07-27 22:00 · 184 policies, 3 changed · Clean</div>
+          <div class="tool-actions">
+            <button class="btn btn-primary btn-sm" type="button">Run now</button>
+            <button class="btn btn-sm" type="button">Schedule</button>
+            <button class="btn btn-ghost btn-sm" type="button">View history</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><div><h2>MDM/GPO Conflict Validation</h2><div class="card-subtitle">Find where Intune is silently overriding Group Policy</div></div></div>
+          <p style="font-size:13px; color:var(--text-muted);">Collects evidence from co-managed devices — including Windows' own Blocked Group Policies table — and correlates it against a GPO→CSP mapping catalogue built from local ADMX files.</p>
+          <ul class="tool-list">
+            <li><svg viewBox="0 0 14 14" fill="none"><path d="M2 7l3.3 3.3L12 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>Interactive self-contained HTML report per device</li>
+            <li><svg viewBox="0 0 14 14" fill="none"><path d="M2 7l3.3 3.3L12 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>SQLite history of findings across runs</li>
+            <li><svg viewBox="0 0 14 14" fill="none"><path d="M2 7l3.3 3.3L12 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>Full evidence ZIP per device for audit</li>
+          </ul>
+          <div class="tool-note">No agent, no cloud service, no credential delegation — fleet runs use a <span class="mono">Copy</span> delivery mode that avoids the double-hop problem entirely.</div>
+          <div class="tool-lastrun">Last run: 2026-07-28 09:02 · 247 devices · 38 conflicts, 12 degraded</div>
+          <div class="tool-actions">
+            <button class="btn btn-primary btn-sm" type="button">Run now</button>
+            <button class="btn btn-sm" type="button">Schedule</button>
+            <button class="btn btn-ghost btn-sm" type="button">View history</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= RUNS ================= -->
+    <section class="panel content" id="panel-runs" hidden>
+      <div class="card">
+        <div class="card-header">
+          <div><h2>Run history</h2><div class="card-subtitle">Both toolsets share one run log</div></div>
+        </div>
+        <div class="table-scroll">
+          <table class="data-table" id="runsTable">
+            <thead>
+              <tr>
+                <th></th>
+                <th>Run</th>
+                <th>Type</th>
+                <th>Started</th>
+                <th>Duration</th>
+                <th>Devices / Policies</th>
+                <th>Outcome</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr class="run-toggle" data-run="129">
+                <td><button class="run-expand-btn" aria-label="Expand run detail" type="button"><svg viewBox="0 0 14 14" fill="none"><path d="M5 2.5 10 7l-5 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button></td>
+                <td class="mono">#129</td>
+                <td>Fleet conflict check</td>
+                <td class="tnum">2026-07-28 09:36</td>
+                <td class="tnum">running · 4m so far</td>
+                <td class="tnum">247 devices</td>
+                <td><span class="pill pill-running">In progress</span></td>
+              </tr>
+              <tr class="run-progress-row" data-run-progress="129">
+                <td colspan="7">
+                  <div class="progress-list">
+                    <div class="progress-item"><span class="mono">FIN-WKS-0142</span><span class="progress-state state-complete">Complete</span></div>
+                    <div class="progress-item"><span class="mono">LON-LT-0087</span><span class="progress-state state-active">Collecting evidence…</span></div>
+                    <div class="progress-item"><span class="mono">FLD-SRF-0231</span><span class="progress-state state-complete">Complete</span></div>
+                    <div class="progress-item"><span class="mono">FLD-WKS-0410</span><span class="progress-state state-offline">Offline</span></div>
+                    <div class="progress-item"><span class="mono">FIN-WKS-0076</span><span class="progress-state state-active">Collecting evidence…</span></div>
+                  </div>
+                </td>
+              </tr>
+
+              <tr>
+                <td></td>
+                <td class="mono">#128</td>
+                <td>Policy backup</td>
+                <td class="tnum">2026-07-27 22:00</td>
+                <td class="tnum">6m 40s</td>
+                <td class="tnum">184 policies, 3 changed</td>
+                <td><span class="pill pill-ok">Clean</span></td>
+              </tr>
+              <tr>
+                <td></td>
+                <td class="mono">#127</td>
+                <td>Fleet conflict check</td>
+                <td class="tnum">2026-07-27 09:00</td>
+                <td class="tnum">14m 12s</td>
+                <td class="tnum">247 devices</td>
+                <td><span class="pill pill-conflict">Conflicts (38)</span></td>
+              </tr>
+              <tr>
+                <td></td>
+                <td class="mono">#126</td>
+                <td>Fleet conflict check</td>
+                <td class="tnum">2026-07-26 09:00</td>
+                <td class="tnum">12m 58s</td>
+                <td class="tnum">245 devices</td>
+                <td><span class="pill pill-degraded">Degraded (12)</span></td>
+              </tr>
+              <tr>
+                <td></td>
+                <td class="mono">#125</td>
+                <td>Policy backup</td>
+                <td class="tnum">2026-07-25 22:00</td>
+                <td class="tnum">5m 51s</td>
+                <td class="tnum">182 policies</td>
+                <td><span class="pill pill-ok">Clean</span></td>
+              </tr>
+              <tr>
+                <td></td>
+                <td class="mono">#124</td>
+                <td>Single-device check</td>
+                <td class="tnum">2026-07-25 15:41</td>
+                <td class="tnum">1m 03s</td>
+                <td class="tnum">1 device</td>
+                <td><span class="pill pill-fatal">Fatal</span></td>
+              </tr>
+              <tr>
+                <td></td>
+                <td class="mono">#123</td>
+                <td>Fleet conflict check</td>
+                <td class="tnum">2026-07-24 09:00</td>
+                <td class="tnum">13m 45s</td>
+                <td class="tnum">246 devices</td>
+                <td><span class="pill pill-conflict">Conflicts (31)</span></td>
+              </tr>
+              <tr>
+                <td></td>
+                <td class="mono">#122</td>
+                <td>Policy backup</td>
+                <td class="tnum">2026-07-23 22:00</td>
+                <td class="tnum">5m 58s</td>
+                <td class="tnum">181 policies</td>
+                <td><span class="pill pill-degraded">Degraded</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= REPORTS ================= -->
+    <section class="panel content" id="panel-reports" hidden>
+      <div class="reports-grid">
+        <div class="card report-card">
+          <h3>Fleet readiness summary</h3>
+          <p class="report-desc">Overall counts of clean, conflicted, degraded and fatal outcomes across the fleet, by wave.</p>
+          <div class="report-actions">
+            <button class="btn btn-sm" type="button">Export PDF</button>
+            <button class="btn btn-sm" type="button">Export CSV</button>
+            <button class="btn btn-sm" type="button">Export HTML</button>
+          </div>
+        </div>
+        <div class="card report-card">
+          <h3>Conflicts by policy</h3>
+          <p class="report-desc">Which GPO settings are most often blocked by MDM across co-managed devices.</p>
+          <div class="report-actions">
+            <button class="btn btn-sm" type="button">Export PDF</button>
+            <button class="btn btn-sm" type="button">Export CSV</button>
+            <button class="btn btn-sm" type="button">Export HTML</button>
+          </div>
+        </div>
+        <div class="card report-card">
+          <h3>Policy drift over time</h3>
+          <p class="report-desc">Version history and change frequency for tracked Settings Catalog policies.</p>
+          <div class="report-actions">
+            <button class="btn btn-sm" type="button">Export PDF</button>
+            <button class="btn btn-sm" type="button">Export CSV</button>
+            <button class="btn btn-sm" type="button">Export HTML</button>
+          </div>
+        </div>
+        <div class="card report-card">
+          <h3>Deleted policies <span class="chip chip-planned">Planned</span></h3>
+          <p class="report-desc">Flag policies present in a previous run and missing from the latest one. Roadmap item, not yet shipped.</p>
+          <div class="report-actions">
+            <button class="btn btn-sm" type="button" disabled>Export PDF</button>
+            <button class="btn btn-sm" type="button" disabled>Export CSV</button>
+            <button class="btn btn-sm" type="button" disabled>Export HTML</button>
+          </div>
+        </div>
+        <div class="card report-card">
+          <h3>Evidence export</h3>
+          <p class="report-desc">Full per-device evidence bundle — Blocked Group Policies table, GPResult, registry tree, event logs.</p>
+          <div class="report-actions">
+            <button class="btn btn-sm" type="button">Export PDF</button>
+            <button class="btn btn-sm" type="button">Export CSV</button>
+            <button class="btn btn-sm" type="button">Export HTML</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <footer class="page-footer">
+      Continuum console — design mockup with representative data. No live tenant connection. Generated for internal review.
+    </footer>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ---------- Nav ---------- */
+  var navItems = Array.prototype.slice.call(document.querySelectorAll(".nav-item"));
+  var panels = {
+    dashboard: document.getElementById("panel-dashboard"),
+    devices: document.getElementById("panel-devices"),
+    tools: document.getElementById("panel-tools"),
+    runs: document.getElementById("panel-runs"),
+    reports: document.getElementById("panel-reports")
+  };
+  var titles = {
+    dashboard: "Dashboard",
+    devices: "Devices",
+    tools: "Tools",
+    runs: "Runs",
+    reports: "Reports"
+  };
+  var topbarTitle = document.getElementById("topbarTitle");
+
+  function showPanel(name) {
+    Object.keys(panels).forEach(function (key) {
+      panels[key].hidden = key !== name;
+    });
+    navItems.forEach(function (btn) {
+      btn.classList.toggle("active", btn.getAttribute("data-panel") === name);
+    });
+    topbarTitle.textContent = titles[name] || "Dashboard";
+  }
+
+  navItems.forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      showPanel(btn.getAttribute("data-panel"));
+    });
+  });
+
+  /* ---------- Theme toggle ---------- */
+  var root = document.documentElement;
+  var themeToggle = document.getElementById("themeToggle");
+  var prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+  var current = prefersDark ? "dark" : "light";
+  root.setAttribute("data-theme", current);
+
+  themeToggle.addEventListener("click", function () {
+    current = current === "dark" ? "light" : "dark";
+    root.setAttribute("data-theme", current);
+  });
+
+  /* ---------- Device filter ---------- */
+  var searchInput = document.getElementById("deviceSearch");
+  var statusFilter = document.getElementById("deviceStatusFilter");
+  var deviceRows = Array.prototype.slice.call(document.querySelectorAll("#devicesTable tbody tr"));
+  var noResults = document.getElementById("deviceNoResults");
+
+  function applyDeviceFilter() {
+    var term = (searchInput.value || "").trim().toLowerCase();
+    var status = statusFilter.value;
+    var visibleCount = 0;
+    deviceRows.forEach(function (row) {
+      var text = row.textContent.toLowerCase();
+      var matchesTerm = term === "" || text.indexOf(term) !== -1;
+      var matchesStatus = status === "" || row.getAttribute("data-status") === status;
+      var show = matchesTerm && matchesStatus;
+      row.style.display = show ? "" : "none";
+      if (show) visibleCount++;
+    });
+    noResults.style.display = visibleCount === 0 ? "block" : "none";
+  }
+
+  searchInput.addEventListener("input", applyDeviceFilter);
+  statusFilter.addEventListener("change", applyDeviceFilter);
+
+  /* ---------- Device detail (cross-tool view) ---------- */
+  var deviceDetail = document.getElementById("deviceDetail");
+  var statusLabels = { ok: "Clean", conflict: "Conflicts found", degraded: "Degraded", fatal: "Fatal" };
+  var statusPillClass = { ok: "pill-ok", conflict: "pill-conflict", degraded: "pill-degraded", fatal: "pill-fatal" };
+
+  deviceRows.forEach(function (row) {
+    row.addEventListener("click", function () {
+      deviceRows.forEach(function (r) { r.classList.remove("row-selected"); });
+      row.classList.add("row-selected");
+
+      var hostname = row.getAttribute("data-device");
+      var status = row.getAttribute("data-status");
+      var wave = row.children[1].textContent;
+      var lastChecked = row.children[2].textContent;
+
+      document.getElementById("ddHostname").textContent = hostname;
+      document.getElementById("ddWave").textContent = wave;
+      document.getElementById("ddLastChecked").textContent = lastChecked;
+
+      var pill = document.getElementById("ddStatusPill");
+      pill.className = "pill " + (statusPillClass[status] || "pill-ok");
+      pill.textContent = statusLabels[status] || "Clean";
+
+      deviceDetail.hidden = false;
+      deviceDetail.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+  });
+
+  /* ---------- Runs: expandable in-flight row ---------- */
+  var runToggleRows = Array.prototype.slice.call(document.querySelectorAll("tr.run-toggle"));
+  runToggleRows.forEach(function (row) {
+    var id = row.getAttribute("data-run");
+    var progressRow = document.querySelector('tr.run-progress-row[data-run-progress="' + id + '"]');
+    var btn = row.querySelector(".run-expand-btn");
+    function toggle() {
+      var open = progressRow.classList.toggle("open");
+      row.classList.toggle("run-expanded", open);
+      btn.setAttribute("aria-expanded", open ? "true" : "false");
+    }
+    btn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      toggle();
+    });
+    row.addEventListener("click", toggle);
+  });
+
+  /* ---------- Migration continuum visualisation ---------- */
+  function mulberry32(seed) {
+    return function () {
+      seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+      var t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  var waves = [
+    { name: "Wave 1 — Pilot", count: 24, mean: 88, spread: 7, seed: 11 },
+    { name: "Wave 2 — Finance", count: 96, mean: 50, spread: 17, seed: 22 },
+    { name: "Wave 3 — Field", count: 127, mean: 18, spread: 11, seed: 33 }
+  ];
+
+  var container = document.getElementById("continuumWaves");
+  var svgW = 1000;
+  var rowH = 46;
+  var padX = 14;
+
+  waves.forEach(function (wave) {
+    var rng = mulberry32(wave.seed);
+    var positions = [];
+    for (var i = 0; i < wave.count; i++) {
+      var u1 = Math.max(rng(), 1e-6), u2 = rng();
+      var z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+      var pos = wave.mean + z * wave.spread;
+      pos = Math.min(97, Math.max(3, pos));
+      positions.push(pos);
+    }
+    positions.sort(function (a, b) { return a - b; });
+    var avg = positions.reduce(function (a, b) { return a + b; }, 0) / positions.length;
+    var lo = positions[0], hi = positions[positions.length - 1];
+
+    var rowWrap = document.createElement("div");
+    rowWrap.className = "wave-row";
+
+    var label = document.createElement("div");
+    label.className = "wave-label";
+    label.innerHTML = "<span class=\"wave-name\">" + wave.name + "</span><span class=\"wave-count tnum\">" + wave.count + " devices</span>";
+
+    var trackWrap = document.createElement("div");
+    trackWrap.className = "wave-track-wrap";
+
+    var svgNS = "http://www.w3.org/2000/svg";
+    var svg = document.createElementNS(svgNS, "svg");
+    svg.setAttribute("viewBox", "0 0 " + svgW + " " + rowH);
+    svg.setAttribute("width", "100%");
+    svg.setAttribute("height", rowH);
+    svg.setAttribute("preserveAspectRatio", "none");
+    svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", wave.name + ": average position " + Math.round(avg) + "% toward MDM, range " + Math.round(lo) + " to " + Math.round(hi) + " percent");
+
+    var trackY = rowH / 2;
+    var usableW = svgW - padX * 2;
+
+    function xFor(pct) { return padX + (pct / 100) * usableW; }
+
+    var line = document.createElementNS(svgNS, "line");
+    line.setAttribute("x1", padX); line.setAttribute("x2", svgW - padX);
+    line.setAttribute("y1", trackY); line.setAttribute("y2", trackY);
+    line.setAttribute("stroke", "var(--border)");
+    line.setAttribute("stroke-width", "2");
+    svg.appendChild(line);
+
+    [0, 25, 50, 75, 100].forEach(function (t) {
+      var tick = document.createElementNS(svgNS, "line");
+      var x = xFor(t);
+      tick.setAttribute("x1", x); tick.setAttribute("x2", x);
+      tick.setAttribute("y1", trackY - 5); tick.setAttribute("y2", trackY + 5);
+      tick.setAttribute("stroke", "var(--border)");
+      tick.setAttribute("stroke-width", "1.2");
+      svg.appendChild(tick);
+    });
+
+    var dotRng = mulberry32(wave.seed + 500);
+    positions.forEach(function (pct) {
+      var x = xFor(pct);
+      var jitter = (dotRng() - 0.5) * (rowH - 18);
+      var y = trackY + jitter;
+      var color = "color-mix(in srgb, var(--gpo) " + (100 - pct) + "%, var(--mdm) " + pct + "%)";
+      var circle = document.createElementNS(svgNS, "circle");
+      circle.setAttribute("cx", x);
+      circle.setAttribute("cy", y);
+      circle.setAttribute("r", 3.4);
+      circle.setAttribute("fill", color);
+      circle.setAttribute("opacity", "0.85");
+      svg.appendChild(circle);
+    });
+
+    var avgX = xFor(avg);
+    var avgMarker = document.createElementNS(svgNS, "line");
+    avgMarker.setAttribute("x1", avgX); avgMarker.setAttribute("x2", avgX);
+    avgMarker.setAttribute("y1", 4); avgMarker.setAttribute("y2", rowH - 4);
+    avgMarker.setAttribute("stroke", "var(--text)");
+    avgMarker.setAttribute("stroke-width", "1.6");
+    avgMarker.setAttribute("stroke-dasharray", "3,2");
+    svg.appendChild(avgMarker);
+
+    var caption = document.createElement("div");
+    caption.className = "wave-caption tnum";
+    caption.textContent = "Average " + Math.round(avg) + "% toward MDM · range " + Math.round(lo) + "–" + Math.round(hi) + "%";
+
+    trackWrap.appendChild(svg);
+    trackWrap.appendChild(caption);
+    rowWrap.appendChild(label);
+    rowWrap.appendChild(trackWrap);
+    container.appendChild(rowWrap);
+  });
+})();
+</script>

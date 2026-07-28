@@ -1,0 +1,1300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Continuum — Product Overview</title>
+<meta name="description" content="Continuum: a management console for organisations migrating from Group Policy to Intune.">
+<style>
+  /* ============================================================
+     Reset
+     ============================================================ */
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  h1, h2, h3, h4, p, ul, ol, dl, dd, figure, blockquote { margin: 0; padding: 0; }
+  ul, ol { list-style: none; }
+  img, svg { display: block; max-width: 100%; }
+  button { font: inherit; color: inherit; background: none; border: none; cursor: pointer; }
+  a { color: inherit; }
+  table { border-collapse: collapse; }
+
+  /* ============================================================
+     Design tokens — copied verbatim from continuum-design-system.md
+     ============================================================ */
+  :root {
+    color-scheme: light dark;
+
+    /* Ground + neutrals: blue-biased, never pure grey */
+    --bg:            #F6F8FB;
+    --surface:       #FFFFFF;
+    --surface-2:     #EDF1F6;
+    --border:        #D6DEE8;
+    --text:          #16202E;
+    --text-muted:    #5A6B80;
+
+    /* The two poles of the continuum */
+    --gpo:           #5B7A99;   /* legacy / on-prem Group Policy */
+    --mdm:           #17A398;   /* cloud / Intune MDM  (also the accent) */
+    --accent:        #17A398;
+    --accent-weak:   #D6F0EC;
+
+    /* Four semantic states, matching exit codes 0/1/2/3 */
+    --ok:            #2E8B57;   /* 0 clean            */
+    --fatal:         #C4453C;   /* 1 fatal            */
+    --conflict:      #C77A15;   /* 2 conflicts found  */
+    --degraded:      #7A8699;   /* 3 couldn't tell    */
+    --ok-bg:         #E4F2EA;
+    --fatal-bg:      #FAE6E4;
+    --conflict-bg:   #FBEEDA;
+    --degraded-bg:   #E9EDF2;
+
+    --radius:        8px;
+    --shadow:        0 1px 2px rgba(22,32,46,.06), 0 4px 12px rgba(22,32,46,.05);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:          #0D141E;
+      --surface:     #141D2A;
+      --surface-2:   #1B2634;
+      --border:      #2A3747;
+      --text:        #E6EDF6;
+      --text-muted:  #93A3B8;
+      --gpo:         #7E9CBB;
+      --mdm:         #2ECEC0;
+      --accent:      #2ECEC0;
+      --accent-weak: #123832;
+      --ok:          #4FB37B;
+      --fatal:       #E4685E;
+      --conflict:    #E0A040;
+      --degraded:    #8B99AD;
+      --ok-bg:       #12301F;
+      --fatal-bg:    #351A18;
+      --conflict-bg: #33260F;
+      --degraded-bg: #1E2733;
+      --shadow:      0 1px 2px rgba(0,0,0,.4), 0 4px 14px rgba(0,0,0,.3);
+    }
+  }
+
+  /* Explicit theme toggle overrides — must win in both directions */
+  :root[data-theme="light"] {
+    --bg:          #F6F8FB;
+    --surface:     #FFFFFF;
+    --surface-2:   #EDF1F6;
+    --border:      #D6DEE8;
+    --text:        #16202E;
+    --text-muted:  #5A6B80;
+    --gpo:         #5B7A99;
+    --mdm:         #17A398;
+    --accent:      #17A398;
+    --accent-weak: #D6F0EC;
+    --ok:          #2E8B57;
+    --fatal:       #C4453C;
+    --conflict:    #C77A15;
+    --degraded:    #7A8699;
+    --ok-bg:       #E4F2EA;
+    --fatal-bg:    #FAE6E4;
+    --conflict-bg: #FBEEDA;
+    --degraded-bg: #E9EDF2;
+    --shadow:      0 1px 2px rgba(22,32,46,.06), 0 4px 12px rgba(22,32,46,.05);
+  }
+
+  :root[data-theme="dark"] {
+    --bg:          #0D141E;
+    --surface:     #141D2A;
+    --surface-2:   #1B2634;
+    --border:      #2A3747;
+    --text:        #E6EDF6;
+    --text-muted:  #93A3B8;
+    --gpo:         #7E9CBB;
+    --mdm:         #2ECEC0;
+    --accent:      #2ECEC0;
+    --accent-weak: #123832;
+    --ok:          #4FB37B;
+    --fatal:       #E4685E;
+    --conflict:    #E0A040;
+    --degraded:    #8B99AD;
+    --ok-bg:       #12301F;
+    --fatal-bg:    #351A18;
+    --conflict-bg: #33260F;
+    --degraded-bg: #1E2733;
+    --shadow:      0 1px 2px rgba(0,0,0,.4), 0 4px 14px rgba(0,0,0,.3);
+  }
+
+  /* ============================================================
+     Type
+     ============================================================ */
+  :root {
+    --font-display: "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system, sans-serif;
+    --font-body:    "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+    --font-mono:    "Cascadia Code", "Cascadia Mono", Consolas, ui-monospace, monospace;
+  }
+
+  html { background: var(--bg); }
+
+  body {
+    font-family: var(--font-body);
+    font-weight: 400;
+    font-size: 20px;
+    line-height: 1.6;
+    color: var(--text);
+    background: var(--bg);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1, h2, h3, .slide-title {
+    font-family: var(--font-display);
+    font-weight: 700;
+    text-wrap: balance;
+    color: var(--text);
+  }
+
+  .mono, .stat-figure, .exit-code, .phase-index {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .eyebrow {
+    font-family: var(--font-body);
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+  }
+
+  /* ============================================================
+     Deck shell
+     ============================================================ */
+  .deck {
+    background: var(--bg);
+  }
+
+  .stage {
+    display: block;
+  }
+
+  .slide {
+    position: relative;
+    width: 100%;
+    max-width: 1280px;
+    margin: 0 auto;
+    padding: 64px 88px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 28px;
+  }
+
+  .slide:last-child { border-bottom: none; }
+
+  .slide__inner {
+    display: flex;
+    flex-direction: column;
+    gap: 28px;
+    width: 100%;
+  }
+
+  .slide-title {
+    font-size: 42px;
+    line-height: 1.15;
+    letter-spacing: -0.02em;
+  }
+
+  .slide-title--xl { font-size: 58px; }
+  .slide-title--display { font-size: 76px; letter-spacing: -0.02em; }
+
+  .lede {
+    font-size: 24px;
+    line-height: 1.5;
+    color: var(--text);
+    max-width: 62ch;
+  }
+
+  .body-text {
+    font-size: 20px;
+    max-width: 65ch;
+    color: var(--text);
+  }
+
+  .body-text--muted { color: var(--text-muted); }
+
+  .stat-figure {
+    font-size: 110px;
+    font-weight: 700;
+    line-height: 1;
+    color: var(--accent);
+  }
+
+  .stat-label {
+    font-size: 20px;
+    color: var(--text-muted);
+    max-width: 46ch;
+  }
+
+  /* ---- reusable marked list (CSS-shape bullets, no emoji) ---- */
+  .list--marked li {
+    position: relative;
+    padding-left: 30px;
+    font-size: 20px;
+    line-height: 1.55;
+  }
+  .list--marked li + li { margin-top: 14px; }
+  .list--marked li::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 9px;
+    width: 9px;
+    height: 9px;
+    background: var(--accent);
+    border-radius: 2px;
+  }
+  .list--marked.list--muted li::before { background: var(--text-muted); }
+
+  .list--marked strong { color: var(--text); font-weight: 600; }
+
+  /* ---- eyebrow + title header block, reused across slides ---- */
+  .slide-head {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  /* ---- two-column layout ---- */
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 32px;
+    align-items: stretch;
+  }
+
+  .panel {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    box-shadow: var(--shadow);
+    padding: 28px 30px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .panel--gpo { border-top: 4px solid var(--gpo); }
+  .panel--mdm { border-top: 4px solid var(--mdm); }
+
+  .panel-label {
+    font-family: var(--font-body);
+    font-size: 13px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .panel--gpo .panel-label { color: var(--gpo); }
+  .panel--mdm .panel-label { color: var(--mdm); }
+
+  .panel-title { font-family: var(--font-display); font-size: 24px; font-weight: 700; }
+  .panel-body { font-size: 19px; color: var(--text-muted); }
+
+  /* ---- callout / punchline box ---- */
+  .callout {
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--accent);
+    background: var(--surface);
+    border-radius: var(--radius);
+    padding: 22px 28px;
+    box-shadow: var(--shadow);
+    font-size: 22px;
+    line-height: 1.5;
+  }
+  .callout strong { font-weight: 700; }
+
+  /* ---- table wrap ---- */
+  .table-scroll {
+    overflow-x: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    box-shadow: var(--shadow);
+  }
+  table.deck-table {
+    width: 100%;
+    min-width: 620px;
+    border-collapse: collapse;
+    font-size: 19px;
+  }
+  table.deck-table th, table.deck-table td {
+    text-align: left;
+    padding: 18px 24px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  table.deck-table thead th {
+    font-family: var(--font-body);
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+    background: var(--surface-2);
+  }
+  table.deck-table tbody tr:last-child td { border-bottom: none; }
+  table.deck-table tbody tr.row--emphasis td {
+    background: var(--accent-weak);
+    font-weight: 600;
+  }
+
+  /* ---- state pill (used in 4-states table) ----
+     The severity stripe hangs off the first cell, NOT off the <tr>. A
+     ::before on a table-row generates a box Chromium lays out as a phantom
+     leading cell, which shifted every body row one column right of its
+     header. Anchoring to the first td keeps the stripe on the row's left
+     edge with the columns correctly aligned. */
+  .state-row td { position: relative; }
+  .state-row td:first-child { padding-left: 34px; }
+  .state-row td:first-child::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 6px;
+  }
+  .state-row--ok td:first-child::before { background: var(--ok); }
+  .state-row--fatal td:first-child::before { background: var(--fatal); }
+  .state-row--conflict td:first-child::before { background: var(--conflict); }
+  .state-row--degraded td:first-child::before { background: var(--degraded); }
+
+  .state-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 5px 12px;
+    border-radius: 999px;
+  }
+  .state-pill--ok { color: var(--ok); background: var(--ok-bg); }
+  .state-pill--fatal { color: var(--fatal); background: var(--fatal-bg); }
+  .state-pill--conflict { color: var(--conflict); background: var(--conflict-bg); }
+  .state-pill--degraded { color: var(--degraded); background: var(--degraded-bg); }
+
+  .exit-code {
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--text-muted);
+  }
+
+  /* ---- roadmap timeline ---- */
+  .timeline-scroll { overflow-x: auto; }
+  .timeline {
+    display: flex;
+    gap: 0;
+    min-width: 980px;
+    padding-top: 6px;
+  }
+  .phase {
+    flex: 1 1 0;
+    position: relative;
+    padding: 0 14px 0 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .phase::before {
+    content: "";
+    position: absolute;
+    top: 21px;
+    left: -14px;
+    right: 14px;
+    height: 2px;
+    background: var(--border);
+  }
+  .phase:first-child::before { left: 22px; }
+  .phase-node {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: var(--surface);
+    border: 2px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1;
+  }
+  .phase-index { font-size: 17px; font-weight: 700; color: var(--text-muted); }
+  .phase--current .phase-node { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-weak); }
+  .phase--current .phase-index { color: var(--accent); }
+  .phase-name { font-size: 18px; font-weight: 700; color: var(--text); }
+  .phase-desc { font-size: 15px; color: var(--text-muted); line-height: 1.45; max-width: 26ch; }
+  .phase-badge {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--accent);
+    background: var(--accent-weak);
+    border-radius: 999px;
+    padding: 3px 10px;
+    width: fit-content;
+  }
+
+  /* ---- groups (expansion slide) ---- */
+  .groups {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 28px;
+  }
+  .group {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .group-heading {
+    font-size: 14px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--accent);
+    border-bottom: 2px solid var(--border);
+    padding-bottom: 10px;
+  }
+  .group .list--marked li { font-size: 17.5px; }
+
+  /* ---- quote slide ---- */
+  .quote-mark { color: var(--mdm); opacity: 0.55; }
+  .pull-quote {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 30px;
+    line-height: 1.5;
+    letter-spacing: -0.01em;
+    max-width: 58ch;
+    border-left: 4px solid var(--mdm);
+    padding-left: 28px;
+  }
+  .audience-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 22px;
+  }
+  .audience-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px 22px;
+    box-shadow: var(--shadow);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .audience-tier {
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--accent);
+  }
+  .audience-body { font-size: 16.5px; color: var(--text-muted); }
+
+  /* ---- title slide ---- */
+  .title-slide {
+    justify-content: center;
+    gap: 22px;
+  }
+  .title-name {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 76px;
+    letter-spacing: -0.02em;
+  }
+  .title-tagline {
+    font-size: 24px;
+    color: var(--text-muted);
+    max-width: 46ch;
+  }
+  .title-mark {
+    width: 46px;
+    height: 46px;
+  }
+  .nav-hint {
+    margin-top: 20px;
+    font-size: 15px;
+    color: var(--text-muted);
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    opacity: 1;
+    transition: opacity 0.6s ease;
+  }
+  .nav-hint.is-hidden { opacity: 0; }
+  .nav-hint kbd {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    border-radius: 4px;
+    padding: 1px 7px;
+  }
+
+  /* ---- device-view mock (phase 4 payoff) ---- */
+  .device-mock {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .device-mock__head {
+    padding: 14px 24px;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-muted);
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-2);
+  }
+  .device-mock__body {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+  .device-mock__col {
+    padding: 24px 26px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .device-mock__col + .device-mock__col { border-left: 1px solid var(--border); }
+  .device-mock__label {
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .device-mock__col--gpo .device-mock__label { color: var(--gpo); }
+  .device-mock__col--mdm .device-mock__label { color: var(--mdm); }
+  .device-mock__row {
+    font-size: 16px;
+    padding: 8px 0;
+    border-bottom: 1px dashed var(--border);
+    color: var(--text-muted);
+  }
+  .device-mock__row:last-child { border-bottom: none; }
+  .device-mock__row strong { color: var(--text); font-weight: 600; }
+
+  /* ---- trust / limits slide ---- */
+  .trust-note {
+    font-size: 20px;
+    font-style: italic;
+    color: var(--text-muted);
+    max-width: 68ch;
+  }
+  .limits-list li {
+    position: relative;
+    padding-left: 30px;
+    font-size: 19px;
+    line-height: 1.5;
+  }
+  .limits-list li + li { margin-top: 12px; }
+  .limits-list li::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 10px;
+    width: 10px;
+    height: 2px;
+    background: var(--text-muted);
+  }
+  .limits-list strong { color: var(--text); font-weight: 600; }
+
+  /* ============================================================
+     Chrome (nav / theme / progress) — enhanced experience only
+     ============================================================ */
+  .chrome { display: none; }
+  .progress-track { display: none; }
+
+  /* ============================================================
+     JS-enhanced single-slide staging
+     ============================================================ */
+  html.js body { height: 100vh; overflow: hidden; }
+
+  html.js .stage {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    background: var(--bg);
+  }
+
+  html.js .slide {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 1280px;
+    height: 720px;
+    margin: 0;
+    padding: 80px 96px;
+    border-bottom: none;
+    border-radius: var(--radius);
+    transform: translate(-50%, -50%) scale(var(--scale, 1));
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.4s ease;
+  }
+
+  html.js .slide.is-active {
+    opacity: 1;
+    pointer-events: auto;
+    z-index: 1;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html.js .slide { transition: none; }
+    .nav-hint { transition: none; }
+  }
+
+  html.js .chrome {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    padding: 14px 26px;
+    z-index: 10;
+    pointer-events: none;
+  }
+  html.js .chrome > * { pointer-events: auto; }
+
+  html.js .progress-track {
+    display: block;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 3px;
+    background: var(--border);
+    z-index: 11;
+  }
+  .progress-bar {
+    height: 100%;
+    width: 0%;
+    background: var(--accent);
+    transition: width 0.3s ease;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .progress-bar { transition: none; }
+  }
+
+  .nav-cluster {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 6px 10px;
+    box-shadow: var(--shadow);
+  }
+  .icon-btn {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-muted);
+  }
+  .icon-btn:hover { color: var(--text); background: var(--surface-2); }
+  .icon-btn svg { width: 18px; height: 18px; }
+
+  .counter {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 14px;
+    color: var(--text-muted);
+    min-width: 62px;
+    text-align: center;
+  }
+
+  .top-controls {
+    display: flex;
+    gap: 10px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 6px;
+    box-shadow: var(--shadow);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  /* ============================================================
+     Responsive: no-JS stacked view keeps sane padding on narrow screens
+     ============================================================ */
+  @media (max-width: 720px) {
+    html:not(.js) .slide { padding: 48px 24px; }
+    html:not(.js) .two-col,
+    html:not(.js) .groups,
+    html:not(.js) .device-mock__body,
+    html:not(.js) .audience-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div class="deck">
+  <main class="stage" id="stage">
+
+    <!-- 1: TITLE -->
+    <section class="slide title-slide" id="slide-1" data-index="1" aria-label="Slide 1: Title">
+      <div class="slide__inner title-slide">
+        <svg class="title-mark" viewBox="0 0 48 48" fill="none" aria-hidden="true">
+          <circle cx="12" cy="24" r="8" fill="var(--gpo)"/>
+          <circle cx="36" cy="24" r="8" fill="var(--mdm)"/>
+          <rect x="12" y="22" width="24" height="4" fill="var(--border)"/>
+        </svg>
+        <h1 class="title-name">Continuum</h1>
+        <p class="title-tagline">A management console for organisations migrating from Group Policy to Intune.</p>
+        <p class="nav-hint" id="nav-hint">Use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> arrow keys to navigate</p>
+      </div>
+    </section>
+
+    <!-- 2: PROBLEM 1/3 -->
+    <section class="slide" id="slide-2" data-index="2" aria-label="Slide 2">
+      <div class="slide__inner">
+        <div class="slide-head">
+          <span class="eyebrow">The problem — 1 of 3</span>
+          <h2 class="slide-title slide-title--xl">Intune has no undo.</h2>
+        </div>
+        <p class="lede">Group Policy admins have decades of tooling: backup, version history, change tracking. Intune has effectively none of it.</p>
+        <div class="callout">
+          If someone edits a policy badly, or deletes one, <strong>there is no version history to restore from and no record of what it used to say.</strong> The tenant simply reflects the new state as though it had always been that way.
+        </div>
+      </div>
+    </section>
+
+    <!-- 3: PROBLEM 2/3 -->
+    <section class="slide" id="slide-3" data-index="3" aria-label="Slide 3">
+      <div class="slide__inner">
+        <div class="slide-head">
+          <span class="eyebrow">The problem — 2 of 3</span>
+          <h2 class="slide-title">Co-managed devices lie about what's enforced.</h2>
+        </div>
+        <div class="two-col">
+          <div class="panel panel--gpo">
+            <span class="panel-label">Group Policy</span>
+            <span class="panel-title">Looks correctly configured</span>
+            <p class="panel-body">Every GPO tool the admin has — GPResult, RSoP, the console itself — shows the setting applied. No error. No warning.</p>
+          </div>
+          <div class="panel panel--mdm">
+            <span class="panel-label">Intune MDM</span>
+            <span class="panel-title">Silently wins</span>
+            <p class="panel-body">When a device gets policy from both worlds, MDM overrides Group Policy. The GPO simply stops taking effect.</p>
+          </div>
+        </div>
+        <div class="callout">
+          An admin believes a security setting is enforced on <strong>500 machines</strong>. On the co-managed ones, <strong>it isn't</strong>.
+        </div>
+      </div>
+    </section>
+
+    <!-- 4: PROBLEM 3/3 -->
+    <section class="slide" id="slide-4" data-index="4" aria-label="Slide 4">
+      <div class="slide__inner">
+        <div class="slide-head">
+          <span class="eyebrow">The problem — 3 of 3</span>
+          <h2 class="slide-title slide-title--xl">Nobody can answer: are we ready to migrate?</h2>
+        </div>
+        <p class="lede">Migration decisions get made on intuition, because the data to make them properly is scattered across per-device diagnostics nobody has time to collect, read, and correlate.</p>
+      </div>
+    </section>
+
+    <!-- 5: WHAT CONTINUUM IS -->
+    <section class="slide" id="slide-5" data-index="5" aria-label="Slide 5">
+      <div class="slide__inner">
+        <div class="slide-head">
+          <span class="eyebrow">What Continuum is</span>
+          <h2 class="slide-title">One console. Three questions.</h2>
+        </div>
+        <div class="table-scroll">
+          <table class="deck-table">
+            <thead>
+              <tr><th>Question</th><th>Answered by</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>What did this policy look like before someone changed it?</td>
+                <td>Policy history + restore</td>
+              </tr>
+              <tr>
+                <td>Where is Intune silently overriding Group Policy?</td>
+                <td>Conflict validation across the fleet</td>
+              </tr>
+              <tr class="row--emphasis">
+                <td>Is this fleet ready to migrate?</td>
+                <td>The two above, joined per device</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="body-text">The third is the point. Policy drift and MDM/GPO conflict are far more useful side by side than apart — no existing tool puts them together. That combination is the product.</p>
+      </div>
+    </section>
+
+    <!-- 6: WHAT EXISTS TODAY -->
+    <section class="slide" id="slide-6" data-index="6" aria-label="Slide 6">
+      <div class="slide__inner">
+        <div class="slide-head">
+          <span class="eyebrow">What exists today</span>
+          <h2 class="slide-title">Not a prototype.</h2>
+        </div>
+        <div style="display:flex; align-items:baseline; gap:18px;">
+          <span class="stat-figure">~8,100</span>
+          <span class="stat-label">lines of PowerShell, working, in real production use.</span>
+        </div>
+        <div class="two-col">
+          <div class="panel panel--gpo">
+            <span class="panel-label">Policy Backup — 5 scripts</span>
+            <p class="panel-body">Snapshots every Settings Catalog policy to JSON and a versioned Excel workbook, loads history into a single-file SQLite database, and restores from any snapshot — create-only, never overwrites. Change detection hashes settings and assignments, not display names.</p>
+          </div>
+          <div class="panel panel--mdm">
+            <span class="panel-label">MDM/GPO Conflict Validation — 3 scripts</span>
+            <p class="panel-body">Collects evidence from a device and builds a self-contained interactive HTML report; generates a GPO&rarr;CSP mapping catalogue from local ADMX files, no internet required; runs the collector across a fleet from a management server.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 7: DIFFERENTIATOR — EVIDENCE VS INFERENCE -->
+    <section class="slide" id="slide-7" data-index="7" aria-label="Slide 7">
+      <div class="slide__inner">
+        <div class="slide-head">
+          <span class="eyebrow">Differentiator — 1 of 3</span>
+          <h2 class="slide-title">Evidence, not inference.</h2>
+        </div>
+        <div class="two-col">
+          <div class="panel panel--mdm">
+            <span class="panel-label">Evidence</span>
+            <span class="panel-title">What Windows itself states</span>
+            <p class="panel-body">The "Blocked Group Policies" table, parsed straight from <code class="mono">MdmDiagnosticsTool.exe</code>. Authoritative — Windows' own record of what MDM overrode.</p>
+          </div>
+          <div class="panel panel--gpo">
+            <span class="panel-label">Inference</span>
+            <span class="panel-title">What the tool guessed</span>
+            <p class="panel-body">Name-similarity matching between GPO and CSP settings. Labelled as a guess and given a confidence tier — never presented as fact.</p>
+          </div>
+        </div>
+        <p class="body-text">Most tools present one confidence level for everything. In an audit or an incident review, that difference matters enormously.</p>
+      </div>
+    </section>
+
+    <!-- 8: DIFFERENTIATOR — FOUR STATES -->
+    <section class="slide" id="slide-8" data-index="8" aria-label="Slide 8">
+      <div class="slide__inner">
+        <div class="slide-head">
+          <span class="eyebrow">Differentiator — 2 of 3</span>
+          <h2 class="slide-title">Four states, not three.</h2>
+        </div>
+        <div class="table-scroll">
+          <table class="deck-table">
+            <thead>
+              <tr><th>Code</th><th>State</th><th>Meaning</th></tr>
+            </thead>
+            <tbody>
+              <tr class="state-row state-row--ok">
+                <td class="exit-code">0</td>
+                <td><span class="state-pill state-pill--ok">Clean</span></td>
+                <td>Checked — nothing found.</td>
+              </tr>
+              <tr class="state-row state-row--fatal">
+                <td class="exit-code">1</td>
+                <td><span class="state-pill state-pill--fatal">Fatal</span></td>
+                <td>The run did not complete.</td>
+              </tr>
+              <tr class="state-row state-row--conflict">
+                <td class="exit-code">2</td>
+                <td><span class="state-pill state-pill--conflict">Conflicts found</span></td>
+                <td>Actionable — not a failure.</td>
+              </tr>
+              <tr class="state-row state-row--degraded">
+                <td class="exit-code">3</td>
+                <td><span class="state-pill state-pill--degraded">Degraded</span></td>
+                <td>Ran, but evidence was incomplete. A 0 elsewhere in this run is not conclusive.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="body-text">State 3 is the one that matters: instead of a reassuring green zero, the tool says <strong>"I couldn't tell."</strong> That distinction survives into the UI as a first-class state — it is never flattened.</p>
+      </div>
+    </section>
+
+    <!-- 9: DIFFERENTIATOR — DOESN'T NEED THE KEYS -->
+    <section class="slide" id="slide-9" data-index="9" aria-label="Slide 9">
+      <div class="slide__inner">
+        <div class="slide-head">
+          <span class="eyebrow">Differentiator — 3 of 3</span>
+          <h2 class="slide-title">It doesn't need the keys.</h2>
+        </div>
+        <ul class="list--marked">
+          <li><strong>No agent</strong> to install on managed devices.</li>
+          <li><strong>No cloud service</strong> — runs on your management server, on your network.</li>
+          <li><strong>No credential delegation.</strong> Fleet runs use a Copy delivery mode that sidesteps the PowerShell double-hop problem entirely.</li>
+          <li><strong>Report-only by default.</strong> It never auto-modifies tenant policy; restore is create-only.</li>
+          <li><strong>Works offline.</strong> Mapping generation uses local ADMX files and the registry; reports are self-contained HTML with no CDN calls.</li>
+        </ul>
+        <div class="callout">For a security-sensitive buyer, this list <strong>is</strong> the sales pitch.</div>
+      </div>
+    </section>
+
+    <!-- 10: ROADMAP -->
+    <section class="slide" id="slide-10" data-index="10" aria-label="Slide 10">
+      <div class="slide__inner">
+        <div class="slide-head">
+          <span class="eyebrow">The roadmap</span>
+          <h2 class="slide-title">Six phases. Phase 0 in progress.</h2>
+        </div>
+        <div class="timeline-scroll">
+          <div class="timeline">
+            <div class="phase phase--current">
+              <div class="phase-node"><span class="phase-index">0</span></div>
+              <span class="phase-badge">In progress</span>
+              <span class="phase-name">Foundations</span>
+              <span class="phase-desc">Review, tests, shared modules.</span>
+            </div>
+            <div class="phase">
+              <div class="phase-node"><span class="phase-index">1</span></div>
+              <span class="phase-name">Console shell</span>
+              <span class="phase-desc">Local dashboard, single admin.</span>
+            </div>
+            <div class="phase">
+              <div class="phase-node"><span class="phase-index">2</span></div>
+              <span class="phase-name">Device inventory</span>
+              <span class="phase-desc">Import, grouping, migration waves.</span>
+            </div>
+            <div class="phase">
+              <div class="phase-node"><span class="phase-index">3</span></div>
+              <span class="phase-name">Run orchestration</span>
+              <span class="phase-desc">Trigger runs from the UI, live progress.</span>
+            </div>
+            <div class="phase phase--current">
+              <div class="phase-node"><span class="phase-index">4</span></div>
+              <span class="phase-badge">The payoff</span>
+              <span class="phase-name">Dashboard &amp; reporting</span>
+              <span class="phase-desc">The cross-tool device view.</span>
+            </div>
+            <div class="phase">
+              <div class="phase-node"><span class="phase-index">5</span></div>
+              <span class="phase-name">Productionisation</span>
+              <span class="phase-desc">Installer, roles, audit log.</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 11: PHASE 4 — THE PAYOFF -->
+    <section class="slide" id="slide-11" data-index="11" aria-label="Slide 11">
+      <div class="slide__inner">
+        <div class="slide-head">
+          <span class="eyebrow">Phase 4 — the payoff</span>
+          <h2 class="slide-title">The cross-tool device view.</h2>
+        </div>
+        <p class="lede">One page showing a device's policy history <em>and</em> its MDM/GPO conflicts — the thing neither toolset can do alone, and the reason for unifying them at all.</p>
+        <div class="device-mock">
+          <div class="device-mock__head">DESKTOP-4F21A9 &mdash; device view</div>
+          <div class="device-mock__body">
+            <div class="device-mock__col device-mock__col--gpo">
+              <span class="device-mock__label">Policy history</span>
+              <div class="device-mock__row"><strong>BitLocker Baseline</strong> — v4, changed 12 days ago</div>
+              <div class="device-mock__row"><strong>Firewall Rules</strong> — v2, changed 61 days ago</div>
+              <div class="device-mock__row"><strong>Password Policy</strong> — v7, changed 3 days ago</div>
+            </div>
+            <div class="device-mock__col device-mock__col--mdm">
+              <span class="device-mock__label">MDM/GPO conflicts</span>
+              <div class="device-mock__row"><strong>BitLocker Baseline</strong> — blocked by MDM</div>
+              <div class="device-mock__row"><strong>Password Policy</strong> — blocked by MDM</div>
+              <div class="device-mock__row">Firewall Rules — no conflict</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 12: EXPANSION -->
+    <section class="slide" id="slide-12" data-index="12" aria-label="Slide 12">
+      <div class="slide__inner">
+        <div class="slide-head">
+          <span class="eyebrow">Expansion</span>
+          <h2 class="slide-title">Where it grows next.</h2>
+        </div>
+        <div class="groups">
+          <div class="group">
+            <span class="group-heading">Near-term, high value</span>
+            <ul class="list--marked">
+              <li><strong>Deletion detection</strong> — flag anything that vanished since the last run.</li>
+              <li><strong>Scheduled, unattended operation</strong> — cert-based auth, drift alerting.</li>
+              <li><strong>Snapshot diff</strong> — settings and assignments, version to version.</li>
+              <li><strong>Capture what's dropped today</strong> — scope tags, template references.</li>
+            </ul>
+          </div>
+          <div class="group">
+            <span class="group-heading">Medium-term</span>
+            <ul class="list--marked">
+              <li><strong>More policy types</strong> — beyond Settings Catalog.</li>
+              <li><strong>Migration recommendations</strong> — the GPO&rarr;CSP catalogue, turned into guidance.</li>
+              <li><strong>Compliance mapping</strong> — CIS/NIST benchmark alignment.</li>
+            </ul>
+          </div>
+          <div class="group">
+            <span class="group-heading">Longer-term</span>
+            <ul class="list--marked">
+              <li><strong>Multi-tenant / MSP mode</strong> — one console, many customer tenants.</li>
+              <li><strong>Hosted offering</strong> — deliberately out of scope for now; local-only is a feature.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 13: WHAT IT DOES NOT DO -->
+    <section class="slide" id="slide-13" data-index="13" aria-label="Slide 13">
+      <div class="slide__inner">
+        <div class="slide-head">
+          <span class="eyebrow">What it does not do</span>
+          <h2 class="slide-title">Honesty, by design.</h2>
+        </div>
+        <p class="trust-note">Every one of these is a known, deliberate boundary rather than an oversight. Volunteering them is what makes the rest credible.</p>
+        <ul class="limits-list">
+          <li><strong>Settings Catalog only.</strong> Other Intune policy types aren't backed up yet.</li>
+          <li><strong>Secrets don't round-trip.</strong> Graph never returns secret-typed values on read — a restored policy's password or certificate field will be blank, and the tool says so.</li>
+          <li><strong>Restore doesn't reassign.</strong> It recreates the policy and prints the original assignments for a human to reapply — deliberately, not automatically.</li>
+          <li><strong>GPO&rarr;CSP matching is heuristic.</strong> Name similarity, not a Microsoft-published mapping — on a real device the highest-confidence tier produced 0 matches out of 3,549 ADMX policies.</li>
+          <li><strong>"Last modified by" is best-effort</strong>, limited to the tenant's audit retention window.</li>
+          <li><strong>Single administrator, no accounts</strong> in the first release. Multi-user is Phase 5.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- 14: WHO IT'S FOR / PULL QUOTE -->
+    <section class="slide" id="slide-14" data-index="14" aria-label="Slide 14">
+      <div class="slide__inner">
+        <div class="slide-head">
+          <span class="eyebrow">Who it's for</span>
+          <h2 class="slide-title">And why they buy.</h2>
+        </div>
+        <div class="audience-grid">
+          <div class="audience-card">
+            <span class="audience-tier">Primary</span>
+            <p class="audience-body">IT admins and infra teams running a hybrid Windows estate mid-migration, at a scale where per-device diagnostics no longer work.</p>
+          </div>
+          <div class="audience-card">
+            <span class="audience-tier">Secondary</span>
+            <p class="audience-body">MSPs running migrations for clients, who need evidence and reporting they can hand over. Multi-tenant support unlocks this properly.</p>
+          </div>
+          <div class="audience-card">
+            <span class="audience-tier">Tertiary</span>
+            <p class="audience-body">Security and compliance owners who need to demonstrate a policy was enforced — and evidence of when it wasn't.</p>
+          </div>
+        </div>
+        <blockquote class="pull-quote">
+          <span class="quote-mark">&ldquo;</span>You believe your security baseline is enforced across your fleet. On your co-managed devices, some of it silently isn't &mdash; and Windows knows exactly which parts, it just never tells you. This finds them, proves it with Windows' own evidence, and tracks every policy change so you can see what moved and put it back.<span class="quote-mark">&rdquo;</span>
+        </blockquote>
+      </div>
+    </section>
+
+  </main>
+
+  <div class="chrome">
+    <div class="top-controls">
+      <button class="icon-btn" id="theme-toggle" aria-label="Toggle light and dark theme" title="Toggle theme">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <path d="M12 2a10 10 0 1 0 0 20 7 7 0 0 1 0-20Z" fill="currentColor" stroke="none"/>
+          <circle cx="12" cy="12" r="9.5"/>
+        </svg>
+      </button>
+      <button class="icon-btn" id="fullscreen-toggle" aria-label="Toggle fullscreen" title="Fullscreen (F)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5"/>
+        </svg>
+      </button>
+    </div>
+    <div class="nav-cluster">
+      <button class="icon-btn" id="prev-btn" aria-label="Previous slide">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true">
+          <path d="M15 5l-7 7 7 7"/>
+        </svg>
+      </button>
+      <span class="counter" id="counter" aria-live="polite">1 / 14</span>
+      <button class="icon-btn" id="next-btn" aria-label="Next slide">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true">
+          <path d="M9 5l7 7-7 7"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <div class="progress-track" aria-hidden="true">
+    <div class="progress-bar" id="progress-bar"></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var root = document.documentElement;
+  var slides = Array.prototype.slice.call(document.querySelectorAll(".slide"));
+  var total = slides.length;
+  var current = 0;
+
+  var counterEl = document.getElementById("counter");
+  var progressEl = document.getElementById("progress-bar");
+  var prevBtn = document.getElementById("prev-btn");
+  var nextBtn = document.getElementById("next-btn");
+  var themeBtn = document.getElementById("theme-toggle");
+  var fsBtn = document.getElementById("fullscreen-toggle");
+  var hint = document.getElementById("nav-hint");
+
+  function indexFromHash() {
+    var m = /slide-(\d+)/.exec(location.hash);
+    if (!m) { return 0; }
+    var n = parseInt(m[1], 10) - 1;
+    if (isNaN(n) || n < 0 || n >= total) { return 0; }
+    return n;
+  }
+
+  function computeScale() {
+    var vw = window.innerWidth;
+    var vh = window.innerHeight;
+    var scale = Math.min(vw / 1280, vh / 720) * 0.94;
+    if (!isFinite(scale) || scale <= 0) { scale = 1; }
+    root.style.setProperty("--scale", scale);
+  }
+
+  function render(index, updateHash) {
+    current = Math.max(0, Math.min(total - 1, index));
+    slides.forEach(function (slide, i) {
+      var active = i === current;
+      slide.classList.toggle("is-active", active);
+      slide.setAttribute("aria-hidden", active ? "false" : "true");
+    });
+    counterEl.textContent = (current + 1) + " / " + total;
+    var pct = total > 1 ? (current / (total - 1)) * 100 : 100;
+    progressEl.style.width = pct + "%";
+    if (updateHash !== false) {
+      var id = "#slide-" + (current + 1);
+      if (location.hash !== id) {
+        history.replaceState(null, "", id);
+      }
+    }
+  }
+
+  function goTo(index) { render(index, true); }
+  function next() { goTo(current + 1); }
+  function prev() { goTo(current - 1); }
+
+  function isFullscreen() {
+    return !!document.fullscreenElement;
+  }
+
+  function toggleFullscreen() {
+    if (isFullscreen()) {
+      if (document.exitFullscreen) { document.exitFullscreen().catch(function () {}); }
+    } else {
+      var el = document.documentElement;
+      if (el.requestFullscreen) { el.requestFullscreen().catch(function () {}); }
+    }
+  }
+
+  function toggleTheme() {
+    var current = root.getAttribute("data-theme");
+    var next;
+    if (current === "dark") {
+      next = "light";
+    } else if (current === "light") {
+      next = "dark";
+    } else {
+      var prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+      next = prefersDark ? "light" : "dark";
+    }
+    root.setAttribute("data-theme", next);
+    try { localStorage.setItem("continuum-theme", next); } catch (e) {}
+  }
+
+  function hideHint() {
+    if (hint) { hint.classList.add("is-hidden"); }
+  }
+
+  // --- init ---
+  root.classList.add("js");
+
+  try {
+    var savedTheme = localStorage.getItem("continuum-theme");
+    if (savedTheme === "light" || savedTheme === "dark") {
+      root.setAttribute("data-theme", savedTheme);
+    }
+  } catch (e) {}
+
+  computeScale();
+  render(indexFromHash(), false);
+
+  window.addEventListener("resize", computeScale);
+  window.addEventListener("hashchange", function () {
+    render(indexFromHash(), false);
+  });
+
+  prevBtn.addEventListener("click", prev);
+  nextBtn.addEventListener("click", next);
+  themeBtn.addEventListener("click", toggleTheme);
+  fsBtn.addEventListener("click", toggleFullscreen);
+
+  document.addEventListener("keydown", function (e) {
+    switch (e.key) {
+      case "ArrowRight":
+      case "PageDown":
+        e.preventDefault();
+        next();
+        break;
+      case " ":
+        e.preventDefault();
+        next();
+        break;
+      case "ArrowLeft":
+      case "PageUp":
+        e.preventDefault();
+        prev();
+        break;
+      case "Home":
+        e.preventDefault();
+        goTo(0);
+        break;
+      case "End":
+        e.preventDefault();
+        goTo(total - 1);
+        break;
+      case "f":
+      case "F":
+        e.preventDefault();
+        toggleFullscreen();
+        break;
+      default:
+        break;
+    }
+  });
+
+  setTimeout(hideHint, 4500);
+})();
+</script>
+</body>
+</html>
