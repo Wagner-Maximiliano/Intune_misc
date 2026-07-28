@@ -8,6 +8,24 @@ disagree, the code is right and this file is a bug.
 - **Updated by**: session that completed the Phase 0.1 code review (Issue #13)
 - **Current phase**: Phase 0 — Bootstrap & consolidation (review done, tests next)
 
+> ## ⚠️ Where this work lives — read before you branch
+>
+> All Phase 0 work is on **`claude/platform-bootstrap`**, which is **not merged
+> and has no open PR**. `main` does **not** contain `docs/` at all — no
+> onboarding, no status, no roadmap. An agent that starts from `main` will find
+> none of this and will have no idea the project exists.
+>
+> **Start every session with:**
+> ```
+> git fetch origin claude/platform-bootstrap && git checkout claude/platform-bootstrap
+> ```
+>
+> This is the one place the usual convention ("never build on a merged branch;
+> start fresh from `main`") does **not** apply — that rule is about *merged*
+> branches. This one is unmerged and is the only copy of the project's memory.
+> Keep working on it until the user merges it, then follow the normal rule
+> again.
+
 ---
 
 ## What this project is
@@ -99,6 +117,30 @@ Phase 5 ([#21](https://github.com/Wagner-Maximiliano/Intune_misc/issues/21)).
 
 GitHub Issues mirror this roadmap for human visibility (D-007). **If an Issue
 and this file disagree, this file wins** — correct the Issue.
+
+---
+
+## Needs verification on real hardware
+
+The agent sandbox cannot run any of this. The user's testing is the project's
+only real verification, so **unverified changes are listed here until a real
+run confirms them**, then moved to "Recently shipped".
+
+### Outstanding — from the Phase 0.1 review (commit `8ab55c1`)
+
+| What to test | Expected result | Covers |
+|---|---|---|
+| `Backup-IntunePolicies.ps1` against a tenant containing **at least one policy with no assignments** | Completes; that policy's JSON has `"Assignments": []` (not `null`, and no crash) | R-02 |
+| Same run, with **at least one policy with no settings** | Completes; that policy is snapshotted with zero settings rows | R-03 |
+| `Get-IntuneSettingsCatalogSnapshot.ps1` against the same tenant | Same two outcomes as above | R-02, R-05 |
+| `Restore-IntunePolicy.ps1 -WhatIf` on a snapshot whose `Settings` is `null` or `[]` | Prints "Settings count: 0" and warns about an empty policy — instead of silently building a 1-entry payload | R-04 |
+| `Import-PolicyHistoryToDatabase.ps1` over a folder containing a no-settings snapshot | Ingests it rather than erroring on that file | R-03 |
+
+**Before this commit, the first two cases aborted the whole backup**, so if
+you have ever run a backup successfully, your tenant probably has no
+unassigned policy — worth creating one deliberately to test.
+
+Nothing else in the review was changed, so no other behaviour should differ.
 
 ---
 

@@ -16,11 +16,17 @@ exists, which means two things:
 
 Paste this into a fresh session:
 
-> Read `docs/AGENT_ONBOARDING.md` in this repo, then follow it. Work on the
-> next item in `docs/PROJECT_STATUS.md` unless I tell you otherwise.
+> Check out `claude/platform-bootstrap`, read `docs/AGENT_ONBOARDING.md`, then
+> follow it. Work on the next item in `docs/PROJECT_STATUS.md` unless I tell
+> you otherwise.
 
-That is deliberately short. Everything else lives in the repo so it survives
-context compaction, session limits, and model changes.
+**The branch step is not optional.** All project documentation lives on
+`claude/platform-bootstrap`, which is unmerged — `main` has no `docs/` folder
+at all. A session started on `main` sees none of this and will improvise.
+Drop the branch clause only once the user has merged it to `main`.
+
+The rest is deliberately short. Everything else lives in the repo so it
+survives context compaction, session limits, and model changes.
 
 ---
 
@@ -198,6 +204,12 @@ Then, in your final message to the user, state:
 - **Merged branches are archived** (deleted after merge). Never build on top
   of an already-merged branch — start fresh from `main`:
   `git fetch origin main && git checkout -B <branch> origin/main`
+- **Exception, while it lasts: `claude/platform-bootstrap` is unmerged and
+  holds every `docs/` file.** `main` has no documentation at all. Until the
+  user merges it, continue Phase 0 work *on that branch* — the "start fresh
+  from `main`" rule applies to **merged** branches, and following it here
+  would silently discard the project's entire memory. Once it is merged,
+  delete this bullet and go back to the normal rule.
 - **PRs**: only when the user asks. Include what was tested vs. desk-checked.
 - **Commits**: explain *why*, not just what. This project's commit history is
   used as evidence when debugging regressions months later.
