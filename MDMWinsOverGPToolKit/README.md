@@ -468,6 +468,149 @@ supports distinguishing severities. Treat `3` as "re-run or investigate
 when convenient" - it means the run completed but couldn't fully answer the
 question this toolkit exists to answer.
 
+## Invoke-MDMWinsOverGPFleet.ps1 (running against a fleet from a management server)
+
+`Test-MDMWinsOverGP.ps1` is designed to run on one device at a time -
+locally, via Intune Win32 app, SCCM, or an RMM push. `Invoke-MDMWinsOverGPFleet.ps1`
+is a separate, standalone script for the different scenario of a management
+server with network line-of-sight (and admin rights) to many domain-joined
+devices at once, where you want to trigger runs remotely rather than
+deploying anything to each device individually.
+
+It does not collect or analyze anything itself. It only:
+
+1. Reads a device list from a CSV (`-DeviceListCsv`, one `DeviceName` column
+   per row).
+2. Confirms each device is online with `Test-Connection` before touching it.
+3. Runs the existing, unmodified `Test-MDMWinsOverGP.ps1` on every online
+   device as a child `powershell.exe` process (throttled, `-ThrottleLimit`,
+   default 10 concurrent), capturing that script's own 0/1/2/3 exit code.
+4. Collects each device's evidence ZIP centrally.
+5. Writes one `FleetSummary.csv` covering every device: online or not, the
+   remote script's own exit code (see "Exit codes" above), where its ZIP was
+   collected to, and a plain-English `Outcome` (`Success`, `ConflictsFound`,
+   `DegradedEvidence`, `RemoteScriptFailed`, `Offline`, `ConnectionFailed`,
+   `TimedOut`).
+
+```powershell
+# Run as an already-elevated domain admin account - the current session's
+# identity is used automatically, no -Credential needed.
+.\Invoke-MDMWinsOverGPFleet.ps1 `
+    -DeviceListCsv .\Devices.csv `
+    -ResultsShare '\\msfssoftware\Client\MDMWinOverGPO\Results' `
+    -RemoteScriptArguments @('-GenerateMappings')
+```
+
+Pass `-Credential` only when you need to connect as a *different* account
+than the one already running this script (e.g. `-Credential (Get-Credential)`).
+
+`Devices.csv`:
+
+```csv
+DeviceName
+CONTOSO-PC01
+CONTOSO-PC02
+CONTOSO-LAPTOP-047
+```
+
+### The double-hop problem, and why `Copy` is the default delivery mode
+
+This is the single most important thing to understand about running the
+toolkit remotely, because it produces a **confusing symptom**: the device
+reports that the script path "was not found", even though you can browse to
+that exact UNC path from the management server without any trouble.
+
+That is not a wrong path. It is Windows' well-known PowerShell "double-hop"
+limitation. When `Invoke-Command` connects to a device, the resulting remote
+session has **no network credential** - your identity got you *onto* the
+device, but it is not forwarded any further. So the moment code running on
+that device tries to reach a *third* machine (the script share, or the
+results share), it authenticates as nobody, and the UNC path comes back as
+inaccessible - which surfaces as "not found".
+
+`-DeliveryMode` controls how the toolkit deals with this:
+
+| Mode | What happens | Delegation required? |
+|---|---|---|
+| `Copy` **(default)** | The management server reads the toolkit scripts itself, pushes their contents into each session, and the device runs them from a **local temp folder**. The device writes its evidence ZIP locally too; the management server then pulls it back over the already-authenticated session and writes it to `-ResultsShare` itself. | **No.** The remote device never touches a network path. |
+| `RemotePath` | The device opens `-RemoteScriptPath` over the network itself, and writes its ZIP directly to `-ResultsShare`. | **Yes** - CredSSP or resource-based constrained delegation. |
+
+In `Copy` mode, *every* network path in play (`-ScriptSourcePath`,
+`-ResultsShare`) is opened by the management server, running as your
+account - the account that already has access to them. Nothing has to be
+delegated, no share ACL has to be loosened, and no computer account is ever
+involved. That is why it is the default, and why it is what you want unless
+you have a specific reason to do otherwise.
+
+Use `RemotePath` only if you have deliberately configured delegation:
+
+- **CredSSP.** Enable on the management server
+  (`Enable-WSManCredSSP -Role Client -DelegateComputer *.contoso.com`) and on
+  every target device (`Enable-WSManCredSSP -Role Server`). Works reliably,
+  but sends your credential to the remote host and widens what that host
+  could do with it - a deliberate, scoped tradeoff, not a default.
+- **Resource-based constrained delegation (Kerberos).** The "correct" fix
+  for an AD environment that already manages delegation this way, but
+  requires per-device/service AD configuration and is out of scope for this
+  toolkit to set up for you.
+
+### Where evidence ends up
+
+In `Copy` mode the management server retrieves each device's evidence ZIP
+over the same session and writes it to `-ResultsShare`. The ZIP keeps the
+name `Test-MDMWinsOverGP.ps1` already gave it
+(`<ComputerName>-<timestamp>[-PARTIAL].zip`), so devices cannot collide. If
+`-ResultsShare` is not supplied, ZIPs are collected into `CollectedEvidence`
+inside the fleet run's own output folder instead.
+
+Each device's temp folder is removed once its ZIP has been retrieved; pass
+`-KeepRemoteTempFolder` to leave it in place when you need to inspect a
+failed run on the device itself.
+
+### Parameters
+
+| Parameter | Default | Purpose |
+|---|---|---|
+| `-DeviceListCsv` | *(required)* | CSV with a `DeviceName` column. Blank and duplicate rows are skipped with a `WARN`. |
+| `-DeliveryMode` | `Copy` | `Copy` (no delegation needed) or `RemotePath` (needs delegation). See above. |
+| `-ScriptSourcePath` | `Test-MDMWinsOverGP.ps1` next to this script, else the `\\msfssoftware\...` UNC | `Copy` mode only. Path to the main script **as seen from the management server**. `Build-PolicyMappings.ps1` is pushed with it when present, so `-GenerateMappings` works on the device. |
+| `-RemoteScriptPath` | `\\msfssoftware\Client\MDMWinOverGPO\Script\Test-MDMWinsOverGP.ps1` | `RemotePath` mode only. Path **as seen from each device**. Ignored in `Copy` mode. |
+| `-Credential` | current session's identity | Only needed to connect as a different account than the one running the script. |
+| `-ResultsShare` | fleet run's `CollectedEvidence` folder | Where evidence ZIPs are collected. Written to by the management server in `Copy` mode, by the device in `RemotePath` mode. |
+| `-RemoteScriptArguments` | (none) | Extra arguments forwarded as-is to `Test-MDMWinsOverGP.ps1` (e.g. `@('-GenerateMappings','-SinceHours','48')`). Do not pass `-ResultsShare` or `-OutputRoot` here - both are managed for you. |
+| `-ThrottleLimit` | 10 | Max devices processed concurrently. |
+| `-PingCount` | 2 | `Test-Connection` echoes per device before a session is attempted. |
+| `-RemoteTimeoutSeconds` | 1800 | How long to wait for the fleet before marking still-running devices `TimedOut`. Remote runs are not killed - this script just stops waiting. |
+| `-KeepRemoteTempFolder` | off | `Copy` mode only. Leaves the per-device temp folder (scripts, evidence, remote stdout log) on the device for inspection. |
+
+In `Copy` mode, the per-device temp folder is deliberately created as
+`%windir%\Temp\MW-<6-char-id>` rather than under the user's own `%TEMP%` -
+`gpresult.exe` itself rejects an output path longer than 127 characters, and
+`Test-MDMWinsOverGP.ps1` nests `GPResult.xml` four levels below
+`-OutputRoot`; `%windir%\Temp` has a fixed, short length regardless of the
+logon account's username, where `%TEMP%` does not.
+| `-SummaryOutputPath` | `<script folder>\Data\FleetRuns\<timestamp>\FleetSummary.csv` (or a ProgramData fallback - same portability rule as `Test-MDMWinsOverGP.ps1`) | Where the per-device summary CSV is written. |
+| `-DataRoot` | (none) | Pins the fleet-run output location explicitly, same convention as `Test-MDMWinsOverGP.ps1`'s `-DataRoot`. |
+
+Note that in `Copy` mode a mapping CSV should be produced **on the device**
+via `-RemoteScriptArguments @('-GenerateMappings')` rather than referenced by
+path, since a `-MappingCsv` value would be resolved by the device, not the
+management server.
+
+### Requirements on the target devices
+
+PowerShell remoting must be enabled and reachable (`Enable-PSRemoting`,
+TCP 5985/5986 open), and the account you run as needs local admin rights on
+each device - `Test-MDMWinsOverGP.ps1` requires elevation for a live
+collection run. A device that answers a ping but refuses a session is
+reported as `ConnectionFailed` with the reason in the `Detail` column,
+rather than failing the whole run.
+
+This script's own exit code is a fleet-wide rollup: `1` if any device failed
+to run or connect (`RemoteScriptFailed`, `ConnectionFailed`, `TimedOut`),
+else `2` if any device reported conflicts or degraded evidence, else `0`.
+Always read `FleetSummary.csv` for the per-device breakdown.
+
 ## Build-PolicyMappings.ps1 (auto-generating the mapping CSV)
 
 ### Why this exists
