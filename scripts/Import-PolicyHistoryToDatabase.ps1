@@ -147,7 +147,13 @@ function Resolve-ChoiceValue {
 function ConvertTo-FlatSettings {
     <# Flattens the settingInstance tree into { Path, Title, Value, RawValue }
        rows. Same shape/logic as Backup-IntunePolicies.ps1. #>
-    param([Parameter(Mandatory)]$Settings)
+    # AllowNull/AllowEmptyCollection alongside Mandatory: a snapshot for a
+    # policy with no settings is legitimate, and its JSON Settings value
+    # arrives as either $null or an empty array. A bare Mandatory parameter
+    # rejects both at bind time - before the body runs - which aborted the
+    # ingest for that file. The loop below already tolerates both.
+    # Kept in step with Backup-IntunePolicies.ps1's copy of this function.
+    param([Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()]$Settings)
 
     $rows = New-Object System.Collections.Generic.List[object]
 

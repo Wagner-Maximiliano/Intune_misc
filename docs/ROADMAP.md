@@ -13,18 +13,32 @@ Make the existing ~9,000 lines something a product can safely be built on.
 Scope is **both toolsets in full** — see D-008.
 
 - [x] Documentation scaffolding for multi-session work (this file and siblings)
-- [ ] **Full code review** of all three MDMWinsOverGP scripts and all five
-      Policy Backup scripts. Specifically hunt the recurring StrictMode
-      `.Count`-on-`$null` bug class, automatic-variable shadowing, and
-      `Mandatory` array params missing `[AllowEmptyCollection()]`.
+- [x] **Full code review** of all three MDMWinsOverGP scripts and all five
+      Policy Backup scripts — done, see `docs/REVIEW-PHASE0.md`. The MDM
+      toolkit was clean on all three bug classes; every defect was in
+      `scripts/`. Two live crashes fixed, plus three docs corrected for a
+      false StrictMode/path-portability premise.
+- [ ] **Adopt `Set-StrictMode -Version 2.0` in `scripts/`** — the five files
+      there have none. **Sequencing matters**: fix the latent findings first
+      (R-05, R-09), or they all become crashes simultaneously. Best folded
+      into the module extraction below. See R-11.
+- [ ] **Decide the fleet exit-code contract for offline devices** (R-06) — an
+      all-offline run currently exits `0`. Needs the user's call; it is
+      consumed by RMM/Intune.
 - [ ] **Fix the test suite** so it exercises production code instead of
       reimplementing it (Known issue #1). Prerequisite for trusting any
       refactor that follows.
 - [ ] **Extract a shared PowerShell module** — see ARCHITECTURE. Scripts
       become thin CLI wrappers over module functions; the console calls the
       same functions. No logic may live only in a script.
-- [ ] Unify logging, config, and data-root resolution across both toolsets
-      (they currently each have their own `Write-Log` and path logic).
+- [ ] Unify logging, config, and data-root resolution across both toolsets.
+      **Not a merge of two implementations**, as previously assumed: only the
+      MDM toolkit has `Write-Log` (and `$PSScriptRoot`/`ProgramData` paths).
+      `scripts/` has neither — 61 raw `Write-Host` calls and
+      working-directory-relative defaults. So this is "adopt the MDM
+      toolkit's mechanism into Core and migrate 61 call sites", and it
+      **blocks Phase 1/3 progress reporting** because `Write-Host` output
+      cannot be captured by a web UI..
 - [ ] Fix the garbled intro in `MDMWinsOverGPToolKit/README.md` (Known issue #2)
 
 **Done when**: every script's logic is importable and unit-tested, the test

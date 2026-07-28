@@ -5,8 +5,8 @@ Update it in the same commit as any change. If this file and the code
 disagree, the code is right and this file is a bug.
 
 - **Last updated**: 2026-07-28
-- **Updated by**: session that set up the platform bootstrap scaffolding
-- **Current phase**: Phase 0 — Bootstrap & consolidation (just started)
+- **Updated by**: session that completed the Phase 0.1 code review (Issue #13)
+- **Current phase**: Phase 0 — Bootstrap & consolidation (review done, tests next)
 
 ---
 
@@ -74,13 +74,22 @@ Full documentation: `MDMWinsOverGPToolKit/README.md`.
 
 | # | Task | Issue | Depends on |
 |---|---|---|---|
-| 1 | Full code review, both toolsets (~9,000 lines) | [#13](https://github.com/Wagner-Maximiliano/Intune_misc/issues/13) | — |
-| 2 | Fix the test suite so it tests production code | [#14](https://github.com/Wagner-Maximiliano/Intune_misc/issues/14) | #13 |
-| 3 | Extract shared `Continuum.*` modules | [#15](https://github.com/Wagner-Maximiliano/Intune_misc/issues/15) | #13, #14 |
+| ~~1~~ | ~~Full code review, both toolsets~~ — **done**, see `docs/REVIEW-PHASE0.md` | [#13](https://github.com/Wagner-Maximiliano/Intune_misc/issues/13) | — |
+| 2 | Fix the test suite so it tests production code | [#14](https://github.com/Wagner-Maximiliano/Intune_misc/issues/14) | #13 ✅ |
+| 3 | Extract shared `Continuum.*` modules | [#15](https://github.com/Wagner-Maximiliano/Intune_misc/issues/15) | #13 ✅, #14 |
 | 4 | Fix garbled `MDMWinsOverGPToolKit/README.md` intro | [#16](https://github.com/Wagner-Maximiliano/Intune_misc/issues/16) | — (independent) |
 
-**#16 is independent** and small — a good warm-up if you want a quick win
-before the big review.
+**Start with #14.** The review gave it a concrete target: 21 of the 27
+functions in `tests/TestHelpers.ps1` are reimplementations of production
+functions, and all four bugs fixed in the review were invisible to the suite
+for exactly that reason. `docs/REVIEW-PHASE0.md` names all 21.
+
+**#16 is still independent** and small — a good warm-up for a short session.
+
+**Two decisions are waiting on the user** before an agent can act on them:
+R-06 (fleet exit-code contract) and R-11 (when to adopt StrictMode in
+`scripts/`). Both are in `docs/REVIEW-PHASE0.md`. Don't act on either
+unilaterally.
 
 Then Phase 1 ([#17](https://github.com/Wagner-Maximiliano/Intune_misc/issues/17)),
 Phase 2 ([#18](https://github.com/Wagner-Maximiliano/Intune_misc/issues/18)),
@@ -95,10 +104,16 @@ and this file disagree, this file wins** — correct the Issue.
 
 ## Known issues / open threads
 
-1. **The Pester tests don't test production code.** Called out in
-   `docs/IMPROVED-PLAN.md`'s assessment: `tests/TestHelpers.ps1` (697 lines)
-   largely reimplements logic rather than importing it. Fixing this is part
-   of the Phase 0 review, and is a prerequisite for trusting any refactor.
+Full detail for everything the Phase 0.1 review found — including the items
+already fixed — is in **`docs/REVIEW-PHASE0.md`**, indexed R-01…R-12.
+
+1. **The Pester tests don't test production code.** Now quantified by the
+   review: `tests/TestHelpers.ps1` defines 27 functions and **21 (78%) are
+   reimplementations** of production functions, not fixtures. All four bugs
+   fixed in the review were invisible to the suite for this reason. It is also
+   the only file setting `Set-StrictMode -Version Latest`, so its copies run
+   under stricter rules than the code they shadow. Prerequisite for trusting
+   any refactor. Issue #14, and `docs/REVIEW-PHASE0.md` has the full list.
 2. **`MDMWinsOverGPToolKit/README.md` has a garbled intro section** (roughly
    its first ~120 lines) — artifacts of an old bad edit, with fragments like
    `([Microsoft Learn][1])olicyManager device and user settings.` Deliberately
@@ -113,11 +128,60 @@ and this file disagree, this file wins** — correct the Issue.
    no devices. All agent changes are desk-checked only. See AGENT_ONBOARDING §2.
 5. **Branch deletion fails with HTTP 403** from the agent environment. Merged
    branches must be deleted by the user via the GitHub UI.
+6. **StrictMode coverage is split, and the docs used to deny it.**
+   `MDMWinsOverGPToolKit/` sets `Set-StrictMode -Version 2.0` in all three
+   scripts; **the five files in `scripts/` set none.** AGENT_ONBOARDING,
+   CLAUDE.md and this project's review brief all claimed it was universal —
+   corrected in this commit. Consequence: several `scripts/` bugs are *latent*
+   rather than live, and **adopting StrictMode there must come after fixing
+   them** or they all fire at once (R-01, R-11).
+7. **`scripts/` has no path portability.** Zero uses of `$PSScriptRoot` or
+   `$env:ProgramData` across all five files; defaults are
+   working-directory-relative. ARCHITECTURE.md claimed this property
+   repo-wide; it holds only for the MDM toolkit. Bringing `scripts/` onto it
+   during #15 is net-new work **and a behaviour change** for anyone relying on
+   today's relative defaults (R-01).
+8. **An all-offline fleet run exits `0` ("clean").**
+   `Invoke-MDMWinsOverGPFleet.ps1` omits `Offline` from its failure rollup,
+   contradicting its own documented contract ("failed to run **or connect**").
+   A fleet of powered-off machines reports success to RMM/Intune — "couldn't
+   tell" presented as "found nothing". **Left unfixed deliberately**: changing
+   an exit-code contract needs the user's call. Recommendation is to map
+   `Offline` to the existing exit 3 (R-06).
+9. **Throttling silently degrades name/definition resolution.**
+   `Get-SettingDefinition`, `Get-GroupDisplayName` and `Get-AssignmentFilterName`
+   bypass the only retry-capable helper, so a transient 429 is treated as a
+   permanent 404 and **negative-cached for the rest of the run** with no
+   warning. On a large tenant this quietly degrades many settings to raw GUIDs.
+   Fix belongs in `Continuum.Core` (R-07).
+10. **Unverified: the 429 retry path may never execute.** The backoff logic
+    assumes an `Invoke-WebRequest`-shaped exception. If `Invoke-MgGraphRequest`
+    throws a different shape, `$isTransient` is always false and the retry is
+    silently skipped. Cannot be settled without an interpreter — needs a real
+    run against a forced 429 (R-07 "Uncertain").
+11. **Smaller open items**: lexicographic sheet sort picks the wrong "previous"
+    version after >9 runs in one day (R-08); the restore path's defensive
+    guards become unreachable once StrictMode lands (R-09); audit-lookup
+    failures are invisible without `-Verbose`, hiding permission problems
+    (R-10); one unguarded hashtable lookup in the fleet script is inconsistent
+    with its guarded twin (R-12).
 
 ---
 
 ## Recently shipped
 
+- **Phase 0.1 — full code review of both toolsets** (Issue #13, D-008).
+  Findings register: `docs/REVIEW-PHASE0.md`. Headline: the MDM toolkit is
+  **clean on all three target bug classes** — every defect found was in
+  `scripts/`, which never received the PR #9/#10 hardening.
+  Fixed: two **live crashes** in the backup path — a policy with no
+  assignments and a policy with no settings each aborted the run via
+  parameter-binder rejection (independent of StrictMode, so reachable today);
+  a malformed restore payload; and two latent `.Count`-on-`$null` sites.
+  Also corrected three docs that asserted a false premise about StrictMode and
+  path portability. **All desk-checked, none executed** — needs a real run
+  against a tenant containing an unassigned policy and a policy with no
+  settings.
 - **PR #12** — `Invoke-MDMWinsOverGPFleet.ps1`: fleet orchestration from a
   management server. Includes two fixes found on real hardware: the
   double-hop failure (solved via `Copy` delivery mode, no delegation needed)

@@ -50,8 +50,32 @@ about heavy work, not absolute.
 
 ## PowerShell conventions
 
-Every script uses `Set-StrictMode -Version 2.0`. The rules below are not
-style preferences — each one corresponds to a bug that reached a real device.
+**StrictMode coverage is split**: `MDMWinsOverGPToolKit/` sets
+`Set-StrictMode -Version 2.0` in all three scripts; the five files in
+`scripts/` set **none** (only `$ErrorActionPreference = 'Stop'`);
+`tests/TestHelpers.ps1` uses `-Version Latest`. This file used to claim it was
+universal — see `docs/REVIEW-PHASE0.md` R-01, and R-11 before you switch it on
+anywhere.
+
+Write everything as if StrictMode were on. The rules below are not style
+preferences — each one corresponds to a bug that reached a real device.
+
+### Mandatory parameters reject `$null` and `@()` — regardless of StrictMode
+
+```powershell
+param([Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()]$Settings)
+```
+
+Untyped params are affected too, not just `[object[]]`. The binder rejects
+*before* the body runs, so a tolerant body or a call-site `@()` will not save
+you. Two HIGH bugs in the Phase 0.1 review were exactly this.
+
+### `@($null)` is a one-element array, not an empty one
+
+`@($maybeNull) | ForEach-Object { ... }` still runs once with `$_ = $null`.
+Use `Where-Object { $_ }` when the producer can legitimately yield nothing.
+Relatedly, `return $list` on a `List[object]` enumerates on output — an empty
+list arrives as `$null` at the call site, so wrap the call in `@(...)`.
 
 ### `.Count` on a possibly-`$null` value throws
 

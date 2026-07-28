@@ -155,6 +155,13 @@ else {
 
 $settingsPayload = @(
     foreach ($s in $originalSettings) {
+        # A snapshot whose Settings came through as JSON null leaves
+        # $originalSettings as @($null) - a ONE-element array holding $null,
+        # not an empty array. Without this guard that phantom entry became a
+        # bogus { '@odata.type' = <default>; settingInstance = $null } row in
+        # the payload, which both defeated the "zero settings" warning below
+        # (Count was 1, not 0) and POSTed a malformed setting to Graph.
+        if (-not $s) { continue }
         $odataType = $s.'@odata.type'
         if (-not $odataType) { $odataType = '#microsoft.graph.deviceManagementConfigurationSetting' }
         [ordered]@{

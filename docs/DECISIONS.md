@@ -233,3 +233,44 @@ explicit verification step addresses that directly.
 
 **Rejected.** *Orchestrator does everything itself* (simpler, but burns the
 expensive model's context on mechanical work and compacts sessions faster).
+
+---
+
+## D-011 — Fix live crashes now; defer StrictMode adoption and contract changes
+
+- **Date**: 2026-07-28
+- **Status**: Decided (by the Phase 0.1 review session)
+
+**Decision.** In the Phase 0.1 review, fix defects that crash or corrupt
+**today**, and *record* rather than fix two categories: (a) latent bugs that
+only fire once `Set-StrictMode` is adopted in `scripts/`, and (b) anything
+that changes an externally-consumed contract.
+
+Fixed: R-02, R-03 (live binder-rejection crashes), R-04 (malformed restore
+payload), R-05 (free defensive `@()`).
+Recorded only: R-06 (fleet exit codes), R-07…R-12.
+
+**Why.** The review found that `scripts/` has no StrictMode at all, contrary
+to what three docs claimed (R-01). That makes several findings latent rather
+than live. Switching StrictMode on *and* fixing the latent bugs in one
+unverifiable change would produce a large diff whose failure modes could not
+be told apart on the first real run — and nothing here can be executed in the
+sandbox. Keeping the fixed set small and live-only means a real-hardware run
+tests a short, legible list.
+
+R-06 is held back for a different reason: the fleet exit code is consumed by
+the user's RMM and Intune automation. Changing it is the user's call
+(AGENT_ONBOARDING §5), not an agent's.
+
+**Rejected.**
+- *Add StrictMode to `scripts/` in the same commit* — closes the gap
+  immediately and matches the documented standard, but converts every latent
+  finding into a simultaneous crash across the backup and restore paths, in a
+  change nobody can execute before shipping. Correct order is: fix latent
+  findings → adopt StrictMode → verify on a tenant (R-11).
+- *Fix R-06 directly* — the code plainly contradicts its own documented
+  contract, so "fixing" it is defensible. Rejected because either direction
+  (count offline as failure, or document the exclusion) silently changes what
+  the user's existing automation sees.
+- *Record everything and fix nothing* — safest for the diff, but leaves two
+  reachable crashes in a tool that is in real use.

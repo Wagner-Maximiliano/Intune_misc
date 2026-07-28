@@ -44,8 +44,25 @@ blind.
 
 ### 1. This codebase has a recurring bug class. Know it before you write PowerShell.
 
-Every script sets `Set-StrictMode -Version 2.0`. Under StrictMode, accessing
-a property on `$null` **throws** (`PropertyNotFoundStrict`) rather than
+**StrictMode coverage is split, and you must know which half you are in:**
+
+| Location | StrictMode |
+|---|---|
+| `MDMWinsOverGPToolKit/` (3 files) | `Set-StrictMode -Version 2.0` in all three |
+| `scripts/` (5 files) | **none** — only `$ErrorActionPreference = 'Stop'` |
+| `tests/TestHelpers.ps1` | `Set-StrictMode -Version Latest` |
+
+This file used to claim every script sets it. That was wrong; the table above
+is what is actually on disk (verified in the Phase 0.1 review —
+`docs/REVIEW-PHASE0.md` R-01). Adopting StrictMode across `scripts/` is
+planned but **deliberately sequenced**: read R-11 there before switching it
+on, because several latent bugs become simultaneous crashes when you do.
+
+Write every script as if StrictMode were on. It is the standard, `scripts/`
+is the exception, and the exception is closing.
+
+Under StrictMode, accessing a property on `$null` — or any non-existent
+property on any object — **throws** (`PropertyNotFoundStrict`) rather than
 returning `$null`. The specific trap that has bitten this project repeatedly
 in production is `.Count` on something that might be `$null`:
 
@@ -65,8 +82,21 @@ if (-not $things) { ... }
 This exact bug reached a real device **four separate times**. Two related
 traps, both also real incidents here:
 
-- A `[Parameter(Mandatory)]` array parameter rejects a legitimately empty
-  array unless it also has `[AllowEmptyCollection()]`.
+- A `[Parameter(Mandatory)]` parameter rejects a legitimately empty array
+  *and* `$null`, at bind time, unless it also has `[AllowEmptyCollection()]`
+  / `[AllowNull()]`. **This applies to untyped params too** — it is not just
+  an `[object[]]` problem, and it is **independent of StrictMode**, so it
+  bites `scripts/` today. Two HIGH bugs in the Phase 0.1 review were exactly
+  this (`docs/REVIEW-PHASE0.md` R-02, R-03). Because the rejection happens
+  *before* the body runs, a tolerant function body does not save you and a
+  call-site `@()` wrapper does not fix it — fix the declaration.
+- `@($null)` is a **one-element array containing `$null`**, not an empty
+  array. So `@($maybeNull) | ForEach-Object { ... }` still runs once, with
+  `$_ = $null`. Filter with `Where-Object { $_ }` when the producer can
+  yield nothing.
+- A function ending `return $list` on a `List[object]` does **not** return
+  the list — PowerShell enumerates an IEnumerable on output, so an empty one
+  yields `$null` at the call site. Wrap the call in `@(...)`.
 - `$Event`, `$Error`, `$Host`, `$Input`, `$Matches` are PowerShell
   *automatic variables*. Using one as a loop variable silently shadows it.
   (`foreach ($event in ...)` once made every Event ID report as `0`.)

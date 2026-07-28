@@ -181,7 +181,12 @@ else {
 
 Write-Host 'Fetching Settings Catalog policies (settings inline)...'
 $expand   = 'settings($expand=settingDefinitions)'
-$policies = Get-MgGraphAllPages -Uri "beta/deviceManagement/configurationPolicies?`$expand=$expand"
+# @() is load-bearing: Get-MgGraphAllPages returns a List[object], which
+# PowerShell enumerates on output, so a tenant with no policies would leave
+# $policies as $null and .Count below would be a property access on $null -
+# harmless today, but a hard throw the moment Set-StrictMode is adopted here
+# (see docs/PROJECT_STATUS.md Known issue #6).
+$policies = @(Get-MgGraphAllPages -Uri "beta/deviceManagement/configurationPolicies?`$expand=$expand")
 Write-Host "Found $($policies.Count) policies."
 
 if ($Platform -ne 'All') {
@@ -209,8 +214,18 @@ foreach ($policy in $policies) {
     # observed to return a thinner assignment target object that omits the
     # device filter fields (deviceAndAppManagementAssignmentFilterId/Type).
     # The dedicated endpoint returns the full target object.
+    # Get-MgGraphAllPages ends in `return $results` on a List[object], and
+    # PowerShell enumerates an IEnumerable on output - so a policy with no
+    # assignments yields $null here, NOT an empty list. @($null) is then a
+    # ONE-element array containing $null, so an unguarded pipeline would call
+    # Resolve-Assignment -Assignment $null, which a Mandatory parameter
+    # rejects outright ("because it is null") and aborts the run under
+    # $ErrorActionPreference='Stop'. Unassigned policies are common.
+    # Where-Object drops the phantom null; the outer @() wraps the whole
+    # pipeline (not just its input) so zero results stay an empty array
+    # rather than collapsing back to $null.
     $rawAssignments = Get-MgGraphAllPages -Uri "beta/deviceManagement/configurationPolicies/$($policy.id)/assignments"
-    $assignments = @($rawAssignments) | ForEach-Object { Resolve-Assignment -Assignment $_ }
+    $assignments = @(@($rawAssignments) | Where-Object { $_ } | ForEach-Object { Resolve-Assignment -Assignment $_ })
 
     $snapshot = [pscustomobject]@{
         PolicyType           = 'SettingsCatalog'

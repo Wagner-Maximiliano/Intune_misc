@@ -33,10 +33,20 @@ Intune_misc/
 
 These were hard-won and should survive the refactor:
 
-- **Path portability.** Everything resolves from `$PSScriptRoot`, never the
-  current working directory, with an automatic fallback to `$env:ProgramData`
-  when the script folder isn't writable (read-only share, Intune package
-  cache). Central deployment depends on this.
+- **Path portability — `MDMWinsOverGPToolKit/` only.** There, everything
+  resolves from `$PSScriptRoot`, never the current working directory, with an
+  automatic fallback to `$env:ProgramData` when the script folder isn't
+  writable (read-only share, Intune package cache). Central deployment depends
+  on this.
+
+  **`scripts/` does not have this property** — zero occurrences of
+  `$PSScriptRoot` or `$env:ProgramData` in all five files; its defaults
+  (`.\output`, `.\PolicySummary.xlsx`, `.\output\db\PolicyHistory.sqlite`) are
+  working-directory-relative. This document previously claimed the property
+  repo-wide, which was wrong (`docs/REVIEW-PHASE0.md` R-01). Bringing
+  `scripts/` onto it during the module extraction is **net-new work and a
+  behaviour change** for anyone depending on today's relative defaults — not a
+  lift-and-shift.
 - **Deterministic exit codes.** `0` clean / `1` fatal / `2` conflicts found /
   `3` degraded evidence. RMM and Intune consume these. The distinction
   between "found nothing" and "couldn't tell" is deliberate and must not be
