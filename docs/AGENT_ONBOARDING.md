@@ -120,6 +120,10 @@ Do all of this **before** your final message, in the same commit as your work:
 - [ ] Record anything that **failed or is half-done** in PROJECT_STATUS.md
       under "Known issues". A half-finished feature that isn't written down
       is worse than one that was never started.
+- [ ] **GitHub Issues** — close the Issue you completed, or comment on it with
+      progress if it's partially done (see D-007). Issues mirror the roadmap
+      for the user's visibility. **If an Issue and the markdown ever
+      disagree, the markdown wins** — fix the Issue, not the doc.
 - [ ] Commit and push to your branch.
 
 Then, in your final message to the user, state:

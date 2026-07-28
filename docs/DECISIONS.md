@@ -132,11 +132,85 @@ built on top, or the refactor can't be trusted.
 
 ---
 
-## D-006 — Product name
+## D-006 — Product name is "Continuum"
 
 - **Date**: 2026-07-28
-- **Status**: **OPEN — needs a decision from the user**
+- **Status**: Decided (by user)
 
-Working title is **HybridOps Console**, used as a placeholder so docs and
-module names are coherent. Not endorsed. Anything user-visible should route
-through one constant so a rename is cheap.
+**Decision.** The product is **Continuum**. PowerShell modules are namespaced
+`Continuum.Core`, `Continuum.PolicyBackup`, `Continuum.MdmGpo`,
+`Continuum.Console`.
+
+**Why.** The GPO-to-MDM transition is a continuum rather than a cliff edge,
+which is exactly the story this toolbox tells: it gives visibility into a
+gradual migration instead of treating it as a switch. Short, memorable, and
+viable as a commercial name.
+
+**Rejected.** *HybridOps Console* (descriptive but generic, and the term is
+already common); *PolicyBridge* (very clear to a buyer, but risks reading as
+narrower than the eventual scope).
+
+---
+
+## D-007 — GitHub Issues mirror the roadmap; markdown stays canonical
+
+- **Date**: 2026-07-28
+- **Status**: Decided (by user)
+
+**Decision.** Roadmap items also exist as GitHub Issues on a Project board.
+The markdown docs remain authoritative (D-004) — Issues are a human-facing
+view. Agents open/close Issues as they work, but must never treat an Issue as
+the source of truth over `docs/PROJECT_STATUS.md`.
+
+**Why.** The user needs progress visible at a glance without reading files.
+Keeping markdown canonical preserves the property that an agent has full
+context with no API calls, while the board gives a kanban view for planning.
+
+**Conflict rule.** If an Issue and the markdown disagree, **the markdown
+wins** and the Issue gets corrected.
+
+**Rejected.** *Markdown only* (zero overhead but no board); *Milestones only*
+(lighter, but no per-task visibility).
+
+---
+
+## D-008 — Phase 0 reviews all ~9,000 lines, both toolsets
+
+- **Date**: 2026-07-28
+- **Status**: Decided (by user)
+
+**Decision.** The Phase 0 review covers Policy Backup *and* MDMWinsOverGP in
+full, plus fixing the test suite so it exercises production code.
+
+**Why.** D-001 makes these one product sharing a module layer. Reviewing only
+one half would leave the shared foundation half-vetted, and the Policy Backup
+test gap would be inherited straight into `Continuum.Core`.
+
+**Rejected.** *MDMWinsOverGP only* (faster, but leaves the test gap in place
+before absorption); *targeted bug-class sweep only* (fastest to a trustworthy
+refactor, but only finds problems already known to exist).
+
+---
+
+## D-009 — Console is single-admin, localhost-only
+
+- **Date**: 2026-07-28
+- **Status**: Decided (by user)
+
+**Decision.** The console assumes one administrator on the management server.
+No accounts, no roles, **no actor tracking on writes**. Whoever is logged into
+the machine is the user.
+
+**Why.** Fastest path to a useful tool; multi-user was not needed now.
+
+**Accepted cost — read this before "improving" it.** The user was shown the
+alternative (stamping an actor ID on runs and changes now, so multi-user is
+additive later) and **deliberately chose not to**. This means adding
+multi-user in Phase 5 will require a schema migration and touching every
+write path. That is a known, accepted tradeoff — **do not add actor tracking
+or auth scaffolding on your own initiative.** Raise it with the user if it
+starts to bite; don't pre-empt it.
+
+**Rejected.** *Single admin with multi-user-ready schema* (recommended, but
+declined); *full multi-user from day one* (significant work before the tool
+does anything useful).

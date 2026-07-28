@@ -10,6 +10,7 @@ Tick items off as they land, and update `docs/PROJECT_STATUS.md` to match.
 ## Phase 0 — Bootstrap & consolidation ← **current**
 
 Make the existing ~9,000 lines something a product can safely be built on.
+Scope is **both toolsets in full** — see D-008.
 
 - [x] Documentation scaffolding for multi-session work (this file and siblings)
 - [ ] **Full code review** of all three MDMWinsOverGP scripts and all five
@@ -39,7 +40,8 @@ The smallest thing that is genuinely a product rather than a script runner.
 - [ ] Local HTTP server (PowerShell) with static asset serving and a JSON API
 - [ ] Navigation shell: Dashboard / Devices / Tools / Runs / Reports
 - [ ] Shared SQLite schema covering both toolsets (extend the Phase 6a schema)
-- [ ] Auth for the console itself (even if just local-only + a token to start)
+- [ ] Bind to localhost only. **No auth, no accounts, no actor tracking** — see
+      D-009; this is a deliberate, accepted tradeoff, not an oversight.
 - [ ] Light/dark theming, reusing the existing report's CSS custom properties
 
 **Done when**: the console starts with one command, serves a navigable UI,

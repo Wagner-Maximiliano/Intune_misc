@@ -64,11 +64,11 @@ These were hard-won and should survive the refactor:
                     │ HTTP + JSON
 ┌───────────────────▼──────────────────────────┐
 │  Console host  (PowerShell HTTP server)      │
-│  routing · auth · job queue · JSON API       │
+│  routing · job queue · JSON API (localhost)  │
 └───────────────────┬──────────────────────────┘
                     │ direct function calls
 ┌───────────────────▼──────────────────────────┐
-│  HybridOps PowerShell module(s)              │
+│  Continuum PowerShell module(s)              │
 │  ┌────────────┬──────────────┬─────────────┐ │
 │  │ .Core      │ .PolicyBackup│ .MdmGpo     │ │
 │  │ log/config │ Graph, hist. │ collect,    │ │
@@ -94,10 +94,10 @@ deployed to devices and run under Intune/SCCM/RMM.
 
 | Module | Holds |
 |---|---|
-| `HybridOps.Core` | Logging, configuration, data-root resolution, SQLite access, device inventory, run history. Everything both tools need. |
-| `HybridOps.PolicyBackup` | Graph API, snapshots, change history, restore. |
-| `HybridOps.MdmGpo` | Evidence collection, ADMX/CSP mapping, overlap analysis, report generation, fleet orchestration. |
-| `HybridOps.Console` | HTTP host, routing, JSON API, static assets. |
+| `Continuum.Core` | Logging, configuration, data-root resolution, SQLite access, device inventory, run history. Everything both tools need. |
+| `Continuum.PolicyBackup` | Graph API, snapshots, change history, restore. |
+| `Continuum.MdmGpo` | Evidence collection, ADMX/CSP mapping, overlap analysis, report generation, fleet orchestration. |
+| `Continuum.Console` | HTTP host, routing, JSON API, static assets. |
 
 `Core` must not depend on the tool modules. The tool modules must not depend
 on each other — anything they'd share belongs in `Core`.
@@ -110,6 +110,10 @@ tables referencing those. `devices` is the join that makes the cross-tool
 view in Phase 4 possible, so it must not be tool-specific.
 
 Evidence files stay on disk, referenced by path — see D-003.
+
+**No actor/user columns.** Per D-009 the console is single-admin and
+localhost-only, and the user explicitly declined multi-user-ready schema.
+Do not add `created_by`/`actor_id` columns speculatively.
 
 ### Deployment shape
 

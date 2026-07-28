@@ -12,9 +12,7 @@ disagree, the code is right and this file is a bug.
 
 ## What this project is
 
-**Working title: HybridOps Console** (name not final — see DECISIONS.md D-006)
-
-A management console for administering and migrating hybrid Windows
+**Continuum** — a management console for administering and migrating hybrid Windows
 environments. Today it is two mature but separate PowerShell toolsets; the
 goal is to unify them behind one browser-based dashboard that a business
 could actually deploy, and eventually sell.
@@ -72,14 +70,26 @@ Full documentation: `MDMWinsOverGPToolKit/README.md`.
 
 ## Next up — in order
 
-**Phase 0 is where you are. Do these before any UI work.**
+**Phase 0 is where you are. Do these before any UI work (D-005).**
 
-1. **Code review + hardening pass** (not started) — see ROADMAP Phase 0.
-   ~9,000 lines have never had a dedicated review. Target the recurring
-   StrictMode `.Count` bug class specifically, plus the `tests/` gap below.
-2. **Extract shared PowerShell module** (not started) — the UI must call
-   testable functions, not shell out to monolithic scripts. See ARCHITECTURE.
-3. **Then** Phase 1 (the console shell). Do not start Phase 1 before 1 and 2.
+| # | Task | Issue | Depends on |
+|---|---|---|---|
+| 1 | Full code review, both toolsets (~9,000 lines) | [#13](https://github.com/Wagner-Maximiliano/Intune_misc/issues/13) | — |
+| 2 | Fix the test suite so it tests production code | [#14](https://github.com/Wagner-Maximiliano/Intune_misc/issues/14) | #13 |
+| 3 | Extract shared `Continuum.*` modules | [#15](https://github.com/Wagner-Maximiliano/Intune_misc/issues/15) | #13, #14 |
+| 4 | Fix garbled `MDMWinsOverGPToolKit/README.md` intro | [#16](https://github.com/Wagner-Maximiliano/Intune_misc/issues/16) | — (independent) |
+
+**#16 is independent** and small — a good warm-up if you want a quick win
+before the big review.
+
+Then Phase 1 ([#17](https://github.com/Wagner-Maximiliano/Intune_misc/issues/17)),
+Phase 2 ([#18](https://github.com/Wagner-Maximiliano/Intune_misc/issues/18)),
+Phase 3 ([#19](https://github.com/Wagner-Maximiliano/Intune_misc/issues/19)),
+Phase 4 ([#20](https://github.com/Wagner-Maximiliano/Intune_misc/issues/20)),
+Phase 5 ([#21](https://github.com/Wagner-Maximiliano/Intune_misc/issues/21)).
+
+GitHub Issues mirror this roadmap for human visibility (D-007). **If an Issue
+and this file disagree, this file wins** — correct the Issue.
 
 ---
 
