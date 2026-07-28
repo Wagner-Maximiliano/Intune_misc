@@ -353,3 +353,33 @@ the user's RMM and Intune automation. Changing it is the user's call
   the user's existing automation sees.
 - *Record everything and fix nothing* — safest for the diff, but leaves two
   reachable crashes in a tool that is in real use.
+
+---
+
+## D-014 — Do not change the fleet script's exit-code behavior, even to fix a bug
+
+- **Date**: 2026-07-28
+- **Status**: Decided (by user)
+
+**Decision.** `Invoke-MDMWinsOverGPFleet.ps1`'s exit-code contract
+(`0`/`1`/`2`/`3`) stays exactly as it is, including the discrepancy found at
+R-06 (an all-offline fleet run currently exits `0`, "clean", even though the
+script's own header says it should exit `1`). **No agent may change this
+script's exit-code logic on its own initiative**, even to correct a
+documented contradiction.
+
+**Why.** This exit code is not just internal to the script — it is a contract
+already read by the user's RMM and Intune automation. The user does not want
+that native, already-relied-upon behavior touched, independent of whether the
+current behavior is technically a bug.
+
+**Rejected.** *Remap `Offline` to exit `3` (degraded evidence)* — this was the
+review's recommendation (R-06) and reuses an exit code the fleet script
+already defines but never emits, so it wouldn't have invented new behavior.
+Declined anyway: the user's priority here is stability of what downstream
+automation already sees, not correctness of the contract in isolation.
+
+**If this bites in practice** (e.g. an all-offline run is later mistaken for
+a healthy fleet), raise it with the user again — don't fix it unilaterally.
+This decision covers the exit-code *contract*; it does not forbid fixing
+unrelated bugs elsewhere in the same file.

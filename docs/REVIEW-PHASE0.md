@@ -215,7 +215,10 @@ that look like a plausible permissions problem rather than a bug.
 
 ## Open — recorded, deliberately not fixed here
 
-### R-06 — MEDIUM/HIGH — An all-offline fleet run exits `0` ("clean")
+### R-06 — MEDIUM/HIGH — An all-offline fleet run exits `0` ("clean") — WON'T FIX (user decision)
+
+- **Decided**: 2026-07-28, by the user. See D-014 in `docs/DECISIONS.md`.
+
 `Invoke-MDMWinsOverGPFleet.ps1:775`
 
 ```powershell
@@ -233,12 +236,14 @@ with no conflicts detected."** An RMM or Intune consumer reads that as a
 healthy fleet. This is exactly the collapse `ARCHITECTURE.md` forbids —
 "couldn't tell" reported as "found nothing".
 
-**Not fixed: this changes an exit-code contract consumed by RMM and Intune**,
-so it needs the user's decision (AGENT_ONBOARDING §5). Recommendation:
-map `Offline` to the **existing exit 3 (degraded evidence)**, which
-`Test-MDMWinsOverGP.ps1` defines but the fleet script never emits. That reuses
-the established contract instead of inventing a state, and keeps "some devices
-unreachable" distinct from both "clean" and "conflicts found".
+I recommended remapping `Offline` to the existing exit `3` (degraded
+evidence). **The user declined**: this exit code is a contract that existing
+RMM/Intune automation already reads and depends on, and the user does not
+want that native behavior touched, full stop — not even to fix a real
+discrepancy.
+
+**Do not revisit this on your own initiative.** If it turns out to bite in
+practice, raise it with the user again rather than changing it — see D-014.
 
 ### R-07 — MEDIUM — Throttling silently degrades definition/name resolution
 `Backup-IntunePolicies.ps1:258` (`Get-SettingDefinition`), `:167`, `:180`;

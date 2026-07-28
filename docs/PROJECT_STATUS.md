@@ -128,10 +128,16 @@ things to carry into it, both already scaffolded:
 
 **#16 is still independent** and small — a good warm-up for a short session.
 
-**Three decisions are waiting on the user** before an agent can act on them:
-R-06 (fleet exit-code contract), R-11 (when to adopt StrictMode in `scripts/`)
-and R-15 (a content-hash fix that would re-ingest affected policies once). All
-three are in `docs/REVIEW-PHASE0.md`. Don't act on any of them unilaterally.
+**Two decisions are still waiting on the user**: R-11 (when to adopt
+StrictMode in `scripts/`) and R-15 (a content-hash fix that would re-ingest
+affected policies once). Both are in `docs/REVIEW-PHASE0.md`. Don't act on
+either unilaterally.
+
+**R-06 (fleet exit-code contract) is now decided — leave it alone.** The user
+declined the recommended fix: the fleet script's exit codes are a contract
+already read by their RMM/Intune automation, and they don't want that native
+behavior changed, even to correct the documented discrepancy. See D-014 in
+`docs/DECISIONS.md`. **Do not "fix" this on your own initiative.**
 
 Then Phase 1 ([#17](https://github.com/Wagner-Maximiliano/Intune_misc/issues/17)),
 Phase 2 ([#18](https://github.com/Wagner-Maximiliano/Intune_misc/issues/18)),
@@ -232,13 +238,15 @@ already fixed — is in **`docs/REVIEW-PHASE0.md`**, indexed R-01…R-12.
    repo-wide; it holds only for the MDM toolkit. Bringing `scripts/` onto it
    during #15 is net-new work **and a behaviour change** for anyone relying on
    today's relative defaults (R-01).
-8. **An all-offline fleet run exits `0` ("clean").**
-   `Invoke-MDMWinsOverGPFleet.ps1` omits `Offline` from its failure rollup,
-   contradicting its own documented contract ("failed to run **or connect**").
-   A fleet of powered-off machines reports success to RMM/Intune — "couldn't
-   tell" presented as "found nothing". **Left unfixed deliberately**: changing
-   an exit-code contract needs the user's call. Recommendation is to map
-   `Offline` to the existing exit 3 (R-06).
+8. **An all-offline fleet run exits `0` ("clean") — accepted, will not be
+   changed.** `Invoke-MDMWinsOverGPFleet.ps1` omits `Offline` from its
+   failure rollup, contradicting its own documented contract ("failed to run
+   **or connect**"). A fleet of powered-off machines reports success to
+   RMM/Intune — "couldn't tell" presented as "found nothing". The user was
+   shown the fix (map `Offline` to the existing exit 3) and **declined it**:
+   this exit code is a contract their RMM/Intune automation already reads,
+   and they don't want that native behavior touched. See D-014.
+   **Do not revisit this without the user raising it again.**
 9. **Throttling silently degrades name/definition resolution.**
    `Get-SettingDefinition`, `Get-GroupDisplayName` and `Get-AssignmentFilterName`
    bypass the only retry-capable helper, so a transient 429 is treated as a

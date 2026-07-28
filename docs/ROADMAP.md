@@ -35,9 +35,11 @@ Scope is **both toolsets in full** — see D-008.
       into the module extraction below. See R-11. The suite is now the
       instrument for this: flip the `Set-StrictMode -Off` line at the top of
       each test file to `-Version 2.0` at the same time and re-run.
-- [ ] **Decide the fleet exit-code contract for offline devices** (R-06) — an
-      all-offline run currently exits `0`. Needs the user's call; it is
-      consumed by RMM/Intune.
+- [x] **Fleet exit-code contract for offline devices, decided** (R-06,
+      D-014) — an all-offline run exits `0`, contradicting the script's own
+      documented contract. The user declined the fix: it's a contract their
+      RMM/Intune automation already reads natively, and they don't want it
+      touched. Stays as-is. Don't revisit without the user raising it again.
 - [ ] **Decide whether to align the two content-hash copies** (R-15) — a
       pre-R-02 snapshot (`"Assignments": null`) hashes differently in the
       import script than in the backup script. One-line fix, but it changes
