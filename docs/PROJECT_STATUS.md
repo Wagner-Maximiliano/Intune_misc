@@ -94,13 +94,21 @@ Full documentation: `MDMWinsOverGPToolKit/README.md`.
 | # | Task | Issue | Depends on |
 |---|---|---|---|
 | ~~1~~ | ~~Full code review, both toolsets~~ — **done**, see `docs/REVIEW-PHASE0.md` | [#13](https://github.com/Wagner-Maximiliano/Intune_misc/issues/13) | — |
-| ~~2~~ | ~~Fix the test suite so it tests production code~~ — **done**, see `tests/README.md` | [#14](https://github.com/Wagner-Maximiliano/Intune_misc/issues/14) | #13 ✅ |
+| 2 | Fix the test suite so it tests production code — **written, see `tests/README.md`; Issue stays open until it has been run** | [#14](https://github.com/Wagner-Maximiliano/Intune_misc/issues/14) | #13 ✅ |
 | 3 | Extract shared `Continuum.*` modules | [#15](https://github.com/Wagner-Maximiliano/Intune_misc/issues/15) | #13 ✅, #14 ✅ |
 | 4 | Fix garbled `MDMWinsOverGPToolKit/README.md` intro | [#16](https://github.com/Wagner-Maximiliano/Intune_misc/issues/16) | — (independent) |
 
-**Start with #15**, but **run the suite first** (`Invoke-Pester ./tests`) — it
-has never been executed, only desk-checked, so treat its first run as part of
-the task. See "Needs verification on real hardware" below.
+**Finish #14 first, then start #15.** #14's code is written and committed, but
+its last acceptance criterion — "a deliberate break in a production script
+causes a test failure" — needs an interpreter, so it is still open. Closing it
+is two steps:
+
+1. `Invoke-Pester ./tests` and fix whatever the first real run turns up.
+2. Mutate something in `scripts/` on purpose (change a `.Trim()` in
+   `Get-SafeFileName`, or drop the `Where-Object { $_ }` at
+   `Backup-IntunePolicies.ps1:671`) and confirm the suite goes red, then revert.
+
+See "Needs verification" below.
 
 #15 is now much safer than it was: the suite runs the shipped code, so a
 refactor that changes behaviour shows up rather than passing silently. Two

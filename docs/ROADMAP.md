@@ -18,15 +18,17 @@ Scope is **both toolsets in full** — see D-008.
       toolkit was clean on all three bug classes; every defect was in
       `scripts/`. Two live crashes fixed, plus three docs corrected for a
       false StrictMode/path-portability premise.
-- [x] **Fix the test suite** so it exercises production code instead of
-      reimplementing it — done (Issue #14, D-012). `TestHelpers.ps1` and its 21
-      copies are gone; the suite loads real function source by AST and runs
-      whole scripts against an offline Graph fake, and a guard test stops the
-      copies returning. Found and fixed **R-13** (R-03's fix stopped one line
-      short — a no-settings policy still aborted) and **R-14**
-      ("Last Modified By" was always blank). See `tests/README.md`.
-      **Not yet executed** — the agent sandbox has no interpreter, so its
-      first real run is part of the next session's work.
+- [ ] **Fix the test suite** so it exercises production code instead of
+      reimplementing it — **written, not yet run** (Issue #14, D-012).
+      `TestHelpers.ps1` and its 21 copies are gone; the suite loads real
+      function source by AST and runs whole scripts against an offline Graph
+      fake, and a guard test stops the copies returning. Writing it found and
+      fixed **R-13** (R-03's fix stopped one line short — a no-settings policy
+      still aborted) and **R-14** ("Last Modified By" was always blank). See
+      `tests/README.md`. **Remaining**: run `Invoke-Pester ./tests`, fix what
+      the first run turns up, and confirm a deliberate break in `scripts/`
+      turns the suite red. That last step is the Issue's own acceptance
+      criterion and needs an interpreter the agent sandbox does not have.
 - [ ] **Adopt `Set-StrictMode -Version 2.0` in `scripts/`** — the five files
       there have none. **Sequencing matters**: fix the latent findings first
       (R-05, R-09), or they all become crashes simultaneously. Best folded
