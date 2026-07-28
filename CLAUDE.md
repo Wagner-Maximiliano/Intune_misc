@@ -11,7 +11,15 @@ Quick map:
 - `docs/DECISIONS.md` — settled decisions; don't relitigate
 - `docs/ROADMAP.md` — phases and what's out of scope
 - `docs/ARCHITECTURE.md` — module layout and data model
-- `docs/IMPROVED-PLAN.md` — pre-existing backlog for the Policy Backup toolset
+- `docs/PRODUCT-VISION.md` — what the product *is*, who buys it, and what it
+  deliberately does not do. Read before any UI or feature work.
+- `docs/REVIEW-PHASE0.md` — code-review findings register (R-01…R-15)
+- `docs/IMPROVED-PLAN.md` — pre-existing backlog for the Policy Backup toolset.
+  **Largely superseded**: its phase numbering collides with `ROADMAP.md`, and
+  its "Phase 6b" static-HTML viewer is explicitly rejected by D-002. Mine it
+  for feature ideas, not for plan structure.
+- `docs/presentation/` — console mockup and slide deck (design mockups with
+  representative data, not live system output)
 
 ---
 

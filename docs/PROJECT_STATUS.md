@@ -45,6 +45,15 @@ The two toolsets solve adjacent problems that migration teams hit together:
    silently override Group Policy. This collects evidence from a device (or a
    fleet) and reports where MDM and GPO actually conflict.
 
+**For the full product scope** — positioning, differentiators, the expansion
+plan beyond Phase 5, who buys it, and an explicit list of what the product
+does *not* do — see **`docs/PRODUCT-VISION.md`**. Read it before any UI or
+feature work; it is where the "why" lives, while this file tracks the "where".
+
+Presentation material lives in `docs/presentation/`: an interactive console
+mockup and a slide deck. **Both contain representative sample data, not real
+tenant output** — never cite their numbers as measured results.
+
 ---
 
 ## Current state — what actually exists and works
