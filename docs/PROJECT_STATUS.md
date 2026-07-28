@@ -5,8 +5,9 @@ Update it in the same commit as any change. If this file and the code
 disagree, the code is right and this file is a bug.
 
 - **Last updated**: 2026-07-28
-- **Updated by**: session that completed the Phase 0.1 code review (Issue #13)
-- **Current phase**: Phase 0 — Bootstrap & consolidation (review done, tests next)
+- **Updated by**: session that rewrote the test suite (Issue #14)
+- **Current phase**: Phase 0 — Bootstrap & consolidation (review and tests done,
+  module extraction next)
 
 > ## ⚠️ Where this work lives — read before you branch
 >
@@ -59,7 +60,7 @@ Both toolsets are **working and in real use**. Nothing below is speculative.
 | `Restore-IntunePolicy.ps1` | 234 | Working (Phase 5). |
 | `Get-IntuneSettingsCatalogSnapshot.ps1` | 233 | Working. |
 | `Export-PolicySummary.ps1` | 120 | Working. |
-| `tests/` (Pester) | 838 | Exists, but see Known issues #1. |
+| `tests/` (Pester) | ~1,200 | **Rewritten** (Issue #14). Exercises production code; see `tests/README.md`. |
 
 Detailed roadmap and a long list of concrete improvement prompts already
 exist in **`docs/IMPROVED-PLAN.md`** (744 lines) — that document is still
@@ -93,21 +94,36 @@ Full documentation: `MDMWinsOverGPToolKit/README.md`.
 | # | Task | Issue | Depends on |
 |---|---|---|---|
 | ~~1~~ | ~~Full code review, both toolsets~~ — **done**, see `docs/REVIEW-PHASE0.md` | [#13](https://github.com/Wagner-Maximiliano/Intune_misc/issues/13) | — |
-| 2 | Fix the test suite so it tests production code | [#14](https://github.com/Wagner-Maximiliano/Intune_misc/issues/14) | #13 ✅ |
-| 3 | Extract shared `Continuum.*` modules | [#15](https://github.com/Wagner-Maximiliano/Intune_misc/issues/15) | #13 ✅, #14 |
+| ~~2~~ | ~~Fix the test suite so it tests production code~~ — **done**, see `tests/README.md` | [#14](https://github.com/Wagner-Maximiliano/Intune_misc/issues/14) | #13 ✅ |
+| 3 | Extract shared `Continuum.*` modules | [#15](https://github.com/Wagner-Maximiliano/Intune_misc/issues/15) | #13 ✅, #14 ✅ |
 | 4 | Fix garbled `MDMWinsOverGPToolKit/README.md` intro | [#16](https://github.com/Wagner-Maximiliano/Intune_misc/issues/16) | — (independent) |
 
-**Start with #14.** The review gave it a concrete target: 21 of the 27
-functions in `tests/TestHelpers.ps1` are reimplementations of production
-functions, and all four bugs fixed in the review were invisible to the suite
-for exactly that reason. `docs/REVIEW-PHASE0.md` names all 21.
+**Start with #15**, but **run the suite first** (`Invoke-Pester ./tests`) — it
+has never been executed, only desk-checked, so treat its first run as part of
+the task. See "Needs verification on real hardware" below.
+
+#15 is now much safer than it was: the suite runs the shipped code, so a
+refactor that changes behaviour shows up rather than passing silently. Two
+things to carry into it, both already scaffolded:
+
+- `tests/TestSupport.ps1`'s AST loader is **temporary**. When the logic moves
+  into `Continuum.*`, replace `Import-ProductionFunction` with `Import-Module`;
+  the tests themselves should barely change. Note its stated limit: functions
+  loaded by AST have no `$PSScriptRoot`, so bringing path portability into
+  `scripts/` (known issue #7) needs the module route.
+- The drift tests in `ImportDatabase.Functions.Tests.ps1` and
+  `ExportSummary.Functions.Tests.ps1` compare the deliberate duplicate copies
+  of `ConvertTo-FlatSettings`, `Get-PolicyContentHash` and the assignment
+  renderer. Those tests are what the extraction is *for*; when the copies
+  collapse into `Continuum.Core`, they become redundant and should be deleted
+  rather than left asserting a tautology.
 
 **#16 is still independent** and small — a good warm-up for a short session.
 
-**Two decisions are waiting on the user** before an agent can act on them:
-R-06 (fleet exit-code contract) and R-11 (when to adopt StrictMode in
-`scripts/`). Both are in `docs/REVIEW-PHASE0.md`. Don't act on either
-unilaterally.
+**Three decisions are waiting on the user** before an agent can act on them:
+R-06 (fleet exit-code contract), R-11 (when to adopt StrictMode in `scripts/`)
+and R-15 (a content-hash fix that would re-ingest affected policies once). All
+three are in `docs/REVIEW-PHASE0.md`. Don't act on any of them unilaterally.
 
 Then Phase 1 ([#17](https://github.com/Wagner-Maximiliano/Intune_misc/issues/17)),
 Phase 2 ([#18](https://github.com/Wagner-Maximiliano/Intune_misc/issues/18)),
@@ -126,21 +142,45 @@ The agent sandbox cannot run any of this. The user's testing is the project's
 only real verification, so **unverified changes are listed here until a real
 run confirms them**, then moved to "Recently shipped".
 
-### Outstanding — from the Phase 0.1 review (commit `8ab55c1`)
+### 1. Run the test suite — it has never been executed
+
+```powershell
+Import-Module Pester -MinimumVersion 5.0
+Invoke-Pester ./tests
+```
+
+**Roughly 1,200 lines of new test code, desk-checked only.** The agent sandbox
+has no PowerShell interpreter, so nothing in `tests/` has ever run. Expect to
+fix harness problems on the first pass — Pester scoping and PowerShell's
+`-like` wildcard rules are the likeliest culprits, not the assertions
+themselves. Needs no tenant, no credentials and no network.
+
+Two tests are `-Skip`ped **on purpose** and would fail if run: they assert the
+fixed behaviour for open findings R-08 and R-15. That is by design, not
+breakage — see `tests/README.md`.
+
+### 2. Outstanding tenant checks — from the review (commit `8ab55c1`) and this one
 
 | What to test | Expected result | Covers |
 |---|---|---|
 | `Backup-IntunePolicies.ps1` against a tenant containing **at least one policy with no assignments** | Completes; that policy's JSON has `"Assignments": []` (not `null`, and no crash) | R-02 |
-| Same run, with **at least one policy with no settings** | Completes; that policy is snapshotted with zero settings rows | R-03 |
+| Same run, with **at least one policy with no settings** | Completes; that policy is snapshotted with zero settings rows | R-03, **R-13** |
+| Same run, **with Excel enabled** (no `-SkipExcel`) on that no-settings policy | A workbook sheet is written with an empty settings table | **R-13** |
+| Same run: check the **"Last Modified By"** column in a workbook and in `_Index.xlsx` | Populated for a changed policy, where it was previously always blank | **R-14** |
 | `Get-IntuneSettingsCatalogSnapshot.ps1` against the same tenant | Same two outcomes as above | R-02, R-05 |
 | `Restore-IntunePolicy.ps1 -WhatIf` on a snapshot whose `Settings` is `null` or `[]` | Prints "Settings count: 0" and warns about an empty policy — instead of silently building a 1-entry payload | R-04 |
-| `Import-PolicyHistoryToDatabase.ps1` over a folder containing a no-settings snapshot | Ingests it rather than erroring on that file | R-03 |
+| `Import-PolicyHistoryToDatabase.ps1` over a folder containing a no-settings snapshot | Ingests it rather than erroring on that file | R-03, **R-13** |
 
-**Before this commit, the first two cases aborted the whole backup**, so if
-you have ever run a backup successfully, your tenant probably has no
-unassigned policy — worth creating one deliberately to test.
+**The no-settings cases still crashed before this commit** — R-03's fix moved
+the failure one line down into `Get-PolicyContentHash` rather than removing it
+(R-13). If you tested that case after the review and it failed, this is why.
 
-Nothing else in the review was changed, so no other behaviour should differ.
+**Before the review commit, the unassigned-policy case aborted the whole
+backup**, so if you have ever run a backup successfully, your tenant probably
+has no unassigned policy — worth creating one deliberately to test.
+
+Nothing else changed, so no other behaviour should differ. R-14 is the one
+change that alters *output* rather than just preventing a crash.
 
 ---
 
@@ -149,13 +189,14 @@ Nothing else in the review was changed, so no other behaviour should differ.
 Full detail for everything the Phase 0.1 review found — including the items
 already fixed — is in **`docs/REVIEW-PHASE0.md`**, indexed R-01…R-12.
 
-1. **The Pester tests don't test production code.** Now quantified by the
-   review: `tests/TestHelpers.ps1` defines 27 functions and **21 (78%) are
-   reimplementations** of production functions, not fixtures. All four bugs
-   fixed in the review were invisible to the suite for this reason. It is also
-   the only file setting `Set-StrictMode -Version Latest`, so its copies run
-   under stricter rules than the code they shadow. Prerequisite for trusting
-   any refactor. Issue #14, and `docs/REVIEW-PHASE0.md` has the full list.
+1. ~~**The Pester tests don't test production code.**~~ **Fixed** (Issue #14).
+   `tests/TestHelpers.ps1` and its 21 copies of production functions are gone.
+   The suite now reaches production code two ways only — an AST loader that
+   copies a function's real source out of the `.ps1`, and whole-script runs
+   against an offline Graph fake — and `tests/SuiteIntegrity.Tests.ps1` fails
+   if any test file ever redefines a production function name again. Full
+   rationale in `tests/README.md`. **Caveat: the suite has never been run**
+   (see "Needs verification" above).
 2. **`MDMWinsOverGPToolKit/README.md` has a garbled intro section** (roughly
    its first ~120 lines) — artifacts of an old bad edit, with fragments like
    `([Microsoft Learn][1])olicyManager device and user settings.` Deliberately
@@ -201,7 +242,21 @@ already fixed — is in **`docs/REVIEW-PHASE0.md`**, indexed R-01…R-12.
     throws a different shape, `$isTransient` is always false and the retry is
     silently skipped. Cannot be settled without an interpreter — needs a real
     run against a forced 429 (R-07 "Uncertain").
-11. **Smaller open items**: lexicographic sheet sort picks the wrong "previous"
+11. **The two content-hash copies disagree on a legacy snapshot.** For a
+    snapshot written before the R-02 fix — `"Assignments": null` —
+    `Import-PolicyHistoryToDatabase.ps1` hashes a phantom `"|||"` assignment
+    line that `Backup-IntunePolicies.ps1` does not, so the same policy state
+    gets two identities and an extra version row on ingest. **Left unfixed
+    deliberately**: the one-line fix changes stored hashes, re-ingesting every
+    affected policy once. Needs the user's call (R-15). A `-Skip`ped test
+    asserts the fixed behaviour.
+12. **Excel and SQLite code paths are still untested.** `Export-PolicyWorkbook`,
+    `Export-IndexWorkbook`, `Get-WorkbookPath` and `Set-CellColor` need
+    `ImportExcel`; `Invoke-Db`, `Initialize-Schema` and the ingest loop need
+    `PSSQLite`. The suite deliberately depends on neither, so these are still
+    verified only by real runs. `MDMWinsOverGPToolKit/` has no tests at all
+    beyond a parse check — it collects evidence from a live Windows device.
+13. **Smaller open items**: lexicographic sheet sort picks the wrong "previous"
     version after >9 runs in one day (R-08); the restore path's defensive
     guards become unreachable once StrictMode lands (R-09); audit-lookup
     failures are invisible without `-Verbose`, hiding permission problems
@@ -212,6 +267,23 @@ already fixed — is in **`docs/REVIEW-PHASE0.md`**, indexed R-01…R-12.
 
 ## Recently shipped
 
+- **Phase 0.2 — the test suite now tests production code** (Issue #14, D-012).
+  `tests/TestHelpers.ps1` deleted along with its 21 copies of production
+  functions; ~1,200 lines of new tests reach the shipped code through an AST
+  loader and an offline Graph fake. Every script in `scripts/` is now exercised,
+  and `tests/SuiteIntegrity.Tests.ps1` guards against the copies coming back.
+  **The rewrite immediately found two bugs this project's own full code review
+  had read past:**
+  - **R-13** — R-03's fix stopped one line short. A policy with no settings
+    still aborted, at `Get-PolicyContentHash`'s parameter binder instead of
+    `ConvertTo-FlatSettings`'. `Export-PolicyWorkbook` had the same
+    declaration. Three declarations fixed; no logic changed.
+  - **R-14** — `Get-PolicyLastModifiedBy` returned `$null` **every time**, so
+    "Last Modified By" was permanently blank in every workbook and in
+    `_Index.xlsx`. A `$top=1` result arrived as a bare hashtable, whose
+    `.Count` is its key count, so the guard passed and `[0]` found nothing.
+  Also recorded R-15 (open, needs a user decision). **All desk-checked, none
+  executed — the suite itself has never been run.**
 - **Phase 0.1 — full code review of both toolsets** (Issue #13, D-008).
   Findings register: `docs/REVIEW-PHASE0.md`. Headline: the MDM toolkit is
   **clean on all three target bug classes** — every defect found was in

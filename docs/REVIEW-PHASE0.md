@@ -141,6 +141,78 @@ re-wraps in `@(...)`.
 
 ---
 
+---
+
+## Found by the rewritten test suite (Issue #14) — FIXED
+
+Both of these were missed by this review. They are recorded here rather than in
+a separate document because they belong to the same findings register, and
+because how they were missed matters more than the bugs themselves.
+
+### R-13 — HIGH — The R-03 fix stopped one line short
+`Backup-IntunePolicies.ps1:673`, `Import-PolicyHistoryToDatabase.ps1:432`,
+and `Backup-IntunePolicies.ps1:709`
+
+R-03 added `[AllowNull()][AllowEmptyCollection()]` to `ConvertTo-FlatSettings`
+so a policy with no settings would stop aborting the run. It did — and then the
+run aborted on the **next line** instead:
+
+```powershell
+$flat = ConvertTo-FlatSettings -Settings $policy.settings   # now returns zero rows
+$hash = Get-PolicyContentHash -FlatSettings $flat -Assignments $assignments
+```
+
+`ConvertTo-FlatSettings` ends `return $rows` on a `List[object]`. PowerShell
+enumerates an IEnumerable on output, so **zero rows arrive at the call site as
+`$null`, not as an empty list** — the exact mechanism this review already
+documented for `Get-MgGraphAllPages` in R-02. `Get-PolicyContentHash`'s bare
+`[Parameter(Mandatory)]$FlatSettings` then rejected it at bind time.
+`Export-PolicyWorkbook -FlatSettings` (reached whenever `-SkipExcel` is not
+used) had the identical declaration.
+
+**Crashed today, on exactly the case R-03 claimed to have fixed.** The
+"policy with no settings" row in `docs/PROJECT_STATUS.md`'s verification table
+would have failed on real hardware.
+
+**Fix**: `[AllowNull()][AllowEmptyCollection()]` on all three declarations. No
+logic changed. The bodies were already tolerant — `foreach` over `$null` runs
+zero times, and piping `$null` yields one canonical `"="` line **identically in
+both copies**, so an empty policy still hashes deterministically and the two
+tools agree on it.
+
+**How it was missed.** The review traced the *declaration* that threw and
+stopped there, instead of following the value's whole path. The lesson is the
+one this file already states about `Get-MgGraphAllPages`: an empty collection
+returned from a PowerShell function is `$null` at every call site, so fixing
+one consumer never finishes the job — every consumer needs checking.
+
+### R-14 — MEDIUM — "Last Modified By" was always blank
+`Backup-IntunePolicies.ps1:225`
+
+```powershell
+$events = Get-MgGraphAllPages -Uri $uri     # ...&$top=1
+if ($events -and $events.Count -gt 0) {
+    $actor = $events[0].actor
+```
+
+Same enumeration rule, opposite symptom: `$top=1` returns exactly one event, so
+`$events` was a **bare hashtable**, never a one-element array. A hashtable's
+`.Count` is its **key count** — 1 — so the guard passed. `$events[0]` on a
+hashtable is a lookup for the key `0`, which does not exist, so `$actor` was
+`$null`, every candidate field was `$null`, and the function returned `$null`
+every single time.
+
+**Silently wrong output, not a crash**, which is why nothing ever surfaced it:
+the "Last Modified By" column in every workbook and in `_Index.xlsx` was
+permanently empty, and R-10 (audit failures invisible without `-Verbose`) made
+that look like a plausible permissions problem rather than a bug.
+
+**Fix**: `$events = @(Get-MgGraphAllPages -Uri $uri)`, and drop the now-redundant
+`$events -and`. Regression test:
+`tests/Backup.Script.Tests.ps1` → "resolves who last modified the policy".
+
+---
+
 ## Open — recorded, deliberately not fixed here
 
 ### R-06 — MEDIUM/HIGH — An all-offline fleet run exits `0` ("clean")
@@ -226,6 +298,38 @@ across the backup and restore paths.
 Correct order: fix every latent finding → add StrictMode → run against a real
 tenant. Best done as part of #15, when this logic moves into modules anyway.
 
+### R-15 — LOW-MEDIUM — The two content-hash copies disagree on a legacy snapshot
+`Backup-IntunePolicies.ps1:392` vs `Import-PolicyHistoryToDatabase.ps1:437`
+
+Both compute the assignment half of the canonical form the same way:
+
+```powershell
+$assignLines = @(@($Assignments) | ForEach-Object { "$($_.AssignmentType)|$($_.GroupId)|..." } | Sort-Object)
+```
+
+The difference is what each hands in. `Backup-IntunePolicies.ps1:671` always
+passes an `@()`-wrapped array, so zero assignments contribute zero lines.
+`Import-PolicyHistoryToDatabase.ps1:430` passes `@($snap.Assignments)`, and for
+a snapshot written **before the R-02 fix** — `"Assignments": null` — that is a
+one-element array holding `$null`. Piping `$null` through `ForEach-Object` runs
+the block once, so the phantom contributes a `"|||"` line.
+
+**Consequence.** The same policy state hashes differently depending on which
+tool computed it, which breaks the invariant the import script states in its
+own header ("so a version imported here has the same identity as the backup
+that produced it") and adds a spurious version row on ingest.
+
+**Not fixed: the fix changes stored content hashes.** Adding
+`Where-Object { $_ }` is a one-liner, but every affected policy would then be
+ingested once more as a "new" version. That is the user's call, in the same
+spirit as R-06. A `-Skip`ped test in
+`tests/ImportDatabase.Functions.Tests.ps1` asserts the fixed behaviour, so
+resolving this is a one-word edit.
+
+Note the related-but-harmless case: `Get-PolicyContentHash -FlatSettings $null`
+also pipes `$null`, yielding a single `"="` line. That is *identical* in both
+copies, so an empty policy still hashes consistently — see R-13.
+
 ### R-12 — LOW — Inconsistent guard on the same lookup
 `Invoke-MDMWinsOverGPFleet.ps1:640` writes `$results[$session.ComputerName].StartedAt`
 unguarded, while line 668 guards the identical lookup with `ContainsKey`. Not
@@ -276,9 +380,21 @@ Cannot be settled without an interpreter. Worth checking against a forced 429.
 
 ## Evidence gathered for the next two Phase 0 tasks
 
-### For #14 (fix the test suite) — Known issue #1, now quantified
+### For #14 (fix the test suite) — DONE, see `tests/README.md`
 
-`tests/TestHelpers.ps1` defines **27 functions; 21 of them (78%) are
+The suite was rewritten against this evidence. Two mechanisms replaced the
+copies: an AST loader that pulls the real function source out of a production
+`.ps1`, and an offline Graph fake that lets a whole script be run end to end
+and its output inspected. `tests/SuiteIntegrity.Tests.ps1` now fails if any
+file under `tests/` defines a function name that also exists in production.
+
+**The rewrite immediately found R-13 and R-14 above** — both in code this
+review had already read. That is the point: the suite now executes the shipped
+code, so it can find what desk-checking misses.
+
+The original evidence, for the record:
+
+`tests/TestHelpers.ps1` defined **27 functions; 21 of them (78%) were
 reimplementations of production functions**, not fixtures: `Write-TextFile`,
 `ConvertFrom-JsonFile`, `Get-MgGraphAllPages`, `Get-GroupDisplayName`,
 `Get-AssignmentFilterName`, `Resolve-Assignment`, `Add-SettingDefinitionToCache`,
@@ -288,17 +404,21 @@ reimplementations of production functions**, not fixtures: `Write-TextFile`,
 `Get-WorkbookPath`, `Format-AssignmentList`, `Export-PolicyWorkbook`,
 `Set-CellColor`, `Export-IndexWorkbook`.
 
-Only 6 are genuine test infrastructure: `Test-HasProp`, `Get-Prop`,
+Only 6 were genuine test infrastructure: `Test-HasProp`, `Get-Prop`,
 `Initialize-IntuneBackup`, `Save-DefinitionCache`, `Read-Manifest`,
 `Write-Manifest`.
 
-**R-02 through R-05 were all invisible to the suite** because it never executes
-the code containing them. The copies have also drifted from the originals.
+**R-02 through R-05 were all invisible to the suite** because it never executed
+the code containing them. The copies had also drifted from the originals — the
+`Resolve-Assignment` copy, for instance, was missing production's normalisation
+of Intune's all-zero "no filter" GUID entirely.
 
-A useful accident: `TestHelpers.ps1` is the *only* file carrying
-`Set-StrictMode -Version Latest`, so its parallel copies run under stricter
-rules than the production code they shadow — the suite could not have caught
-these bugs, and would report a different failure if it ever did.
+A useful accident: `TestHelpers.ps1` was the *only* file carrying
+`Set-StrictMode -Version Latest`, so its parallel copies ran under stricter
+rules than the production code they shadowed — the suite could not have caught
+these bugs, and would have reported a different failure if it ever had. The
+replacement therefore runs with StrictMode off, matching `scripts/`, with a
+guard test and a note about flipping both together when R-11 lands.
 
 ### For #15 (module extraction) — duplication map
 

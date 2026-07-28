@@ -1,0 +1,15 @@
+{
+  "PolicyType": "SettingsCatalog",
+  "Id": "p-null-settings",
+  "Name": "Empty Baseline",
+  "Description": "Snapshot of a policy that has no settings. Written before the R-02 fix, so Assignments is null rather than [] - the exact shape that made R-04 reachable.",
+  "Platforms": "windows10",
+  "Technologies": "mdm",
+  "CreatedDateTime": "2026-06-01T09:00:00Z",
+  "LastModifiedDateTime": "2026-07-01T10:00:00Z",
+  "LastModifiedBy": "admin@contoso.invalid",
+  "Assignments": null,
+  "Settings": null,
+  "ContentHash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "RetrievedAt": "2026-07-01T10:05:00.0000000Z"
+}

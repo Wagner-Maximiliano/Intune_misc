@@ -103,6 +103,15 @@ traps, both also real incidents here:
 - A function ending `return $list` on a `List[object]` does **not** return
   the list — PowerShell enumerates an IEnumerable on output, so an empty one
   yields `$null` at the call site. Wrap the call in `@(...)`.
+  **This is per call site, and that is where fixes keep going wrong.** The
+  Phase 0.1 review fixed `ConvertTo-FlatSettings` so a no-settings policy
+  stopped aborting the backup — and the very next line then aborted it at
+  `Get-PolicyContentHash`'s binder instead (R-13). When you find one of these,
+  follow the value to *every* consumer before calling it fixed.
+  A one-element result is its own trap: a `$top=1` Graph query returned a bare
+  hashtable, whose `.Count` is its **key** count, so `$events.Count -gt 0`
+  passed and `$events[0]` silently found nothing — "Last Modified By" was blank
+  in every workbook for the life of the feature (R-14).
 - `$Event`, `$Error`, `$Host`, `$Input`, `$Matches` are PowerShell
   *automatic variables*. Using one as a loop variable silently shadows it.
   (`foreach ($event in ...)` once made every Event ID report as `0`.)
@@ -120,6 +129,26 @@ devices. **You cannot test your changes.** You must:
 The user tests on real hardware and reports back. That feedback loop is the
 only real verification this project has — respect it by being honest about
 what you did and did not check.
+
+**But there is now a second loop: `tests/`.** The Pester suite runs offline
+against the real `scripts/` code (D-012) and needs no tenant and no extra
+modules, so the user can run `Invoke-Pester ./tests` in seconds. If you change
+anything in `scripts/`, **add or update a test in the same commit** — that is
+how your desk-checked change gets verified without a tenant.
+
+Two rules for it, both non-negotiable:
+
+- **Never copy production code into a test.** That is what Issue #14 was:
+  `tests/TestHelpers.ps1` held private copies of 21 production functions, the
+  copies drifted, and four shipped bugs hid behind a green run. Load the real
+  thing with `Import-ProductionFunction`, or run the whole script against
+  `Enable-FakeGraph`. `tests/SuiteIntegrity.Tests.ps1` fails the build if you
+  forget.
+- **Don't make the suite stricter than production.** It runs
+  `Set-StrictMode -Off` to match `scripts/`. See rule 1 below for why that
+  matters.
+
+`tests/README.md` is short and explains the rest.
 
 ### 3. Update the docs in the same commit as the change.
 
@@ -182,6 +211,9 @@ Do all of this **before** your final message, in the same commit as your work:
 - [ ] `docs/ROADMAP.md` — tick off anything finished; add anything discovered.
 - [ ] `docs/ARCHITECTURE.md` — update if you added a module, endpoint, or
       table, or changed how components talk to each other.
+- [ ] `tests/` — if you touched `scripts/`, add or update a test. If you
+      deferred a finding instead of fixing it, add a `-Skip`ped test asserting
+      the fixed behaviour (D-013).
 - [ ] Record anything that **failed or is half-done** in PROJECT_STATUS.md
       under "Known issues". A half-finished feature that isn't written down
       is worse than one that was never started.

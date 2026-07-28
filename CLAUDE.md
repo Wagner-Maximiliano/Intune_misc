@@ -20,6 +20,10 @@ Quick map:
 1. **You cannot run PowerShell here.** No interpreter, no Windows, no target
    devices. Desk-check your work and **say explicitly in your final message
    that it is unverified.** Never imply you tested something you didn't.
+   You can still *write* tests: `tests/` is an offline Pester suite over the
+   real `scripts/` code that the user can run in seconds. Change `scripts/`,
+   add a test — and **never copy production code into a test** (D-012;
+   `tests/SuiteIntegrity.Tests.ps1` enforces it).
 2. **Update the docs in the same commit as the change.** See the handover
    checklist in `docs/AGENT_ONBOARDING.md`.
 3. **Never commit to `main`.** Branch as `claude/<short-topic>`.

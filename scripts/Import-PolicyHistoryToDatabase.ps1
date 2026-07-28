@@ -241,7 +241,13 @@ function Get-StringSha256 {
 }
 
 function Get-PolicyContentHash {
-    param([Parameter(Mandatory)]$FlatSettings, $Assignments)
+    # AllowNull/AllowEmptyCollection, kept in step with Backup-IntunePolicies.ps1's
+    # copy: ConvertTo-FlatSettings returns a List[object] and PowerShell
+    # enumerates an IEnumerable on output, so a snapshot with no settings makes
+    # the caller's $flat $null - which a bare Mandatory parameter rejects at
+    # bind time. That aborted the ingest of exactly the files R-03 was supposed
+    # to have unblocked (docs/REVIEW-PHASE0.md R-13).
+    param([Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()]$FlatSettings, $Assignments)
     $settingLines = @($FlatSettings | ForEach-Object { "$($_.Path)=$($_.RawValue)" } | Sort-Object)
     $assignLines  = @(@($Assignments) | ForEach-Object { "$($_.AssignmentType)|$($_.GroupId)|$($_.FilterId)|$($_.FilterType)" } | Sort-Object)
     $canonical = ($settingLines -join "`n") + "`n##ASSIGNMENTS##`n" + ($assignLines -join "`n")

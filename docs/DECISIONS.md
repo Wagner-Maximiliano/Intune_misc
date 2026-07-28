@@ -236,6 +236,85 @@ expensive model's context on mechanical work and compacts sessions faster).
 
 ---
 
+## D-012 — Tests reach production code by AST loading and whole-script runs
+
+- **Date**: 2026-07-28
+- **Status**: Decided (by the Issue #14 session)
+
+**Decision.** The Pester suite reaches `scripts/` two ways, and no others:
+
+1. **`Import-ProductionFunction`** parses a production `.ps1` and re-declares
+   the named functions from their AST extent — the real source, byte for byte,
+   with none of the main body's side effects.
+2. **Whole-script runs** against `Enable-FakeGraph`, an in-process stand-in for
+   `Get-MgContext` / `Connect-MgGraph` / `Invoke-MgGraphRequest`, after which
+   the test inspects what the script actually wrote to disk.
+
+**No test may contain a copy of production logic.**
+`tests/SuiteIntegrity.Tests.ps1` enforces this: it fails if any file under
+`tests/` defines a function name that also exists in `scripts/` or
+`MDMWinsOverGPToolKit/`, including names nested inside a `BeforeAll`.
+
+**Why.** Every Policy Backup bug this project has shipped was a
+`[Parameter(Mandatory)]` rejecting `$null` or `@()` **at bind time, before the
+body ran**. A unit test of a body cannot see that, and neither can a call-site
+`@()` wrapper — only the declaration matters. Running the whole script and
+checking the artifacts is the only technique that catches the class. Both R-13
+and R-14 were found this way, in code the full Phase 0.1 review had already
+read line by line.
+
+The AST loader specifically avoids adding a test hook (a `-InitializeOnly`
+switch, say) to production scripts that nobody here can execute.
+
+**Deliberately not covered**: anything needing `ImportExcel` or `PSSQLite`. The
+suite must run anywhere with nothing installed but Pester, which is what makes
+it cheap enough to run on every change. Those paths stay verified by real runs
+and are listed in `docs/PROJECT_STATUS.md`.
+
+**This is scaffolding with a known end date.** When Issue #15 moves the logic
+into `Continuum.*` modules, `Import-ProductionFunction` is replaced by
+`Import-Module` and the drift tests between duplicate copies become redundant.
+
+**Rejected.**
+- *Add a `-InitializeOnly` switch to each script so tests can dot-source it* —
+  simpler harness and it would run the real top-level initialisation too, but
+  it puts a test seam into five production files that cannot be executed in
+  the agent sandbox, and it needs separate placement reasoning in each.
+- *Extract modules first, then write tests against them* — cleaner order in
+  the abstract, but D-005 makes a trustworthy suite the **precondition** for
+  the refactor. Refactoring first is exactly the move the test gap forbids.
+- *Keep the copies but add a drift check between them and production* — much
+  less work, but a drift check that reads code is still not a test that runs
+  it, and neither R-13 nor R-14 would have been found.
+
+---
+
+## D-013 — Open findings get a `-Skip`ped test, not just a doc entry
+
+- **Date**: 2026-07-28
+- **Status**: Decided (by the Issue #14 session)
+
+**Decision.** A finding that is recorded rather than fixed gets a Pester test
+asserting the **fixed** behaviour, marked `-Skip`, with a comment naming the
+finding and the reason it is deferred. R-08 and R-15 have one each.
+
+**Why.** It makes the deferral concrete and cheap to reverse: resolving the
+finding is deleting `-Skip` and running the suite, rather than re-deriving what
+"fixed" would even mean months later. It also keeps the docs honest — a
+skipped test is visible in every run, where a paragraph in a review document is
+not.
+
+**Cost, accepted.** Anyone reading the suite sees tests that would fail. That
+is why the marker must always cite its finding, and why `tests/README.md`
+tabulates them.
+
+**Rejected.** *Leave the finding in `docs/REVIEW-PHASE0.md` only* (no
+maintenance cost, but nothing connects the prose to the code); *write the test
+un-skipped and let the suite go red* (unambiguous, but a permanently failing
+suite trains everyone to ignore failures).
+
+---
+
 ## D-011 — Fix live crashes now; defer StrictMode adoption and contract changes
 
 - **Date**: 2026-07-28

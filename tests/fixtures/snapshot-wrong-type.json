@@ -1,0 +1,13 @@
+{
+  "PolicyType": "DeviceConfiguration",
+  "Id": "p-wrong-type",
+  "Name": "Legacy Device Configuration",
+  "Description": "Not a Settings Catalog policy. Restore-IntunePolicy.ps1 must refuse this rather than POST a payload Graph cannot accept.",
+  "Platforms": "windows10",
+  "Technologies": "mdm",
+  "CreatedDateTime": "2026-06-01T09:00:00Z",
+  "LastModifiedDateTime": "2026-07-01T10:00:00Z",
+  "Assignments": [],
+  "Settings": [],
+  "RetrievedAt": "2026-07-01T10:05:00.0000000Z"
+}

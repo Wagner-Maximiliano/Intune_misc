@@ -18,16 +18,29 @@ Scope is **both toolsets in full** — see D-008.
       toolkit was clean on all three bug classes; every defect was in
       `scripts/`. Two live crashes fixed, plus three docs corrected for a
       false StrictMode/path-portability premise.
+- [x] **Fix the test suite** so it exercises production code instead of
+      reimplementing it — done (Issue #14, D-012). `TestHelpers.ps1` and its 21
+      copies are gone; the suite loads real function source by AST and runs
+      whole scripts against an offline Graph fake, and a guard test stops the
+      copies returning. Found and fixed **R-13** (R-03's fix stopped one line
+      short — a no-settings policy still aborted) and **R-14**
+      ("Last Modified By" was always blank). See `tests/README.md`.
+      **Not yet executed** — the agent sandbox has no interpreter, so its
+      first real run is part of the next session's work.
 - [ ] **Adopt `Set-StrictMode -Version 2.0` in `scripts/`** — the five files
       there have none. **Sequencing matters**: fix the latent findings first
       (R-05, R-09), or they all become crashes simultaneously. Best folded
-      into the module extraction below. See R-11.
+      into the module extraction below. See R-11. The suite is now the
+      instrument for this: flip the `Set-StrictMode -Off` line at the top of
+      each test file to `-Version 2.0` at the same time and re-run.
 - [ ] **Decide the fleet exit-code contract for offline devices** (R-06) — an
       all-offline run currently exits `0`. Needs the user's call; it is
       consumed by RMM/Intune.
-- [ ] **Fix the test suite** so it exercises production code instead of
-      reimplementing it (Known issue #1). Prerequisite for trusting any
-      refactor that follows.
+- [ ] **Decide whether to align the two content-hash copies** (R-15) — a
+      pre-R-02 snapshot (`"Assignments": null`) hashes differently in the
+      import script than in the backup script. One-line fix, but it changes
+      stored hashes and re-ingests affected policies once. Needs the user's
+      call. A `-Skip`ped test already asserts the fixed behaviour (D-013).
 - [ ] **Extract a shared PowerShell module** — see ARCHITECTURE. Scripts
       become thin CLI wrappers over module functions; the console calls the
       same functions. No logic may live only in a script.
@@ -44,6 +57,11 @@ Scope is **both toolsets in full** — see D-008.
 **Done when**: every script's logic is importable and unit-tested, the test
 suite fails if production code breaks, and both toolsets share one logging
 and configuration mechanism.
+
+*Progress against that: "the suite fails if production code breaks" is done for
+`scripts/` as far as an offline suite can go — the Excel and SQLite paths, and
+all of `MDMWinsOverGPToolKit/`, are still uncovered (`docs/PROJECT_STATUS.md`
+known issue #12). "Importable" is what Issue #15 delivers.*
 
 ---
 

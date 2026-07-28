@@ -21,7 +21,7 @@ Intune_misc/
 │   ├── Restore-IntunePolicy.ps1
 │   ├── Get-IntuneSettingsCatalogSnapshot.ps1
 │   └── Export-PolicySummary.ps1
-├── tests/                        Pester (see Known issue #1 — doesn't test prod code)
+├── tests/                        Pester, offline. Runs the real scripts/ code (D-012)
 ├── MDMWinsOverGPToolKit/         MDM-vs-GPO validation toolset
 │   ├── Test-MDMWinsOverGP.ps1             Single-device collection + HTML report
 │   ├── Build-PolicyMappings.ps1           ADMX/registry → GPO↔CSP mapping CSV
@@ -61,6 +61,33 @@ These were hard-won and should survive the refactor:
 - **No-double-hop fleet delivery.** `Copy` mode ensures remote devices never
   touch a network path, so no credential delegation is needed. Any future
   remote execution must keep this property.
+
+### How `tests/` reaches the code (transitional)
+
+`tests/` is offline and needs nothing but Pester — no tenant, no `ImportExcel`,
+no `PSSQLite`. Because every script in `scripts/` is a monolith (parameters,
+functions, then a main body that connects to Graph), tests reach it two ways,
+both defined in `tests/TestSupport.ps1` and settled in D-012:
+
+```
+tests/*.Tests.ps1
+   │
+   ├── Import-ProductionFunction ──► parses scripts/<x>.ps1, re-declares the
+   │                                 named functions from their AST extent
+   │                                 (real source, no main body)
+   │
+   └── Enable-FakeGraph ──► stubs Get-MgContext / Connect-MgGraph /
+                            Invoke-MgGraphRequest at global scope, then the
+                            test runs `& scripts/<x>.ps1 -OutputPath <tmp>`
+                            and inspects the files it wrote
+```
+
+**Both halves are scaffolding for the current shape.** Once the module
+extraction lands, `Import-ProductionFunction` becomes `Import-Module
+Continuum.PolicyBackup` and the whole-script tests become thin CLI-wrapper
+tests over the same module functions. Note the loader's limit before relying on
+it during the extraction: an AST-loaded function has no backing file, so
+`$PSScriptRoot` is empty inside it.
 
 ---
 

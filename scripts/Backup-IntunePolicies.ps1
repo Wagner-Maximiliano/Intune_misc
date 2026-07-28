@@ -222,8 +222,16 @@ function Get-PolicyLastModifiedBy {
     param([Parameter(Mandatory)][string]$PolicyId)
     try {
         $uri = "beta/deviceManagement/auditEvents?`$filter=resources/any(r:r/resourceId eq '$PolicyId')&`$orderby=activityDateTime desc&`$top=1"
-        $events = Get-MgGraphAllPages -Uri $uri
-        if ($events -and $events.Count -gt 0) {
+        # @() is load-bearing. Get-MgGraphAllPages returns a List[object] and
+        # PowerShell enumerates an IEnumerable on output, so the $top=1 query
+        # here - which by construction yields exactly one event - arrived as a
+        # bare hashtable, not a one-element array. A hashtable's .Count is its
+        # KEY count (1, so the guard passed) and $events[0] is a key lookup for
+        # the key '0', which does not exist - so $actor was always $null and
+        # this function always returned $null. "Last Modified By" was therefore
+        # permanently blank in every workbook and index (R-14).
+        $events = @(Get-MgGraphAllPages -Uri $uri)
+        if ($events.Count -gt 0) {
             $actor = $events[0].actor
             foreach ($cand in @($actor.userPrincipalName, $actor.userId, $actor.applicationDisplayName)) {
                 if ($cand) { return $cand }
@@ -383,7 +391,17 @@ function Get-StringSha256 {
 
 function Get-PolicyContentHash {
     <# Stable hash over flattened settings + assignments - NOT display names, so a Microsoft-side rename doesn't create a spurious version. #>
-    param([Parameter(Mandatory)]$FlatSettings, $Assignments)
+    # AllowNull/AllowEmptyCollection is load-bearing, for the same reason it is
+    # on ConvertTo-FlatSettings above, one link further down the chain:
+    # ConvertTo-FlatSettings returns a List[object], PowerShell enumerates an
+    # IEnumerable on output, so a policy with no settings makes the caller's
+    # $flat $null - and a bare Mandatory parameter rejects that at bind time,
+    # before the body runs. Fixing only ConvertTo-FlatSettings moved the crash
+    # from line 672 to line 673 (docs/REVIEW-PHASE0.md R-13).
+    # The body tolerates $null: piping it yields a single canonical '=' line,
+    # identically in Import-PolicyHistoryToDatabase.ps1's copy, so an empty
+    # policy still hashes deterministically and the two tools agree.
+    param([Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()]$FlatSettings, $Assignments)
 
     $settingLines = @($FlatSettings | ForEach-Object { "$($_.Path)=$($_.RawValue)" } | Sort-Object)
     $assignLines  = @(@($Assignments) | ForEach-Object { "$($_.AssignmentType)|$($_.GroupId)|$($_.FilterId)|$($_.FilterType)" } | Sort-Object)
@@ -447,7 +465,10 @@ function Export-PolicyWorkbook {
     <# Appends a new dated worksheet to the policy's workbook, highlighting changes vs. the previous sheet. Returns the sheet name written. #>
     param(
         [Parameter(Mandatory)]$Snapshot,
-        [Parameter(Mandatory)]$FlatSettings,
+        # Same binder trap as Get-PolicyContentHash: a policy with no settings
+        # arrives here as $null, not as an empty list (R-13). The body's
+        # foreach over $null runs zero times, so only the declaration was wrong.
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()]$FlatSettings,
         [datetime]$Date = (Get-Date)
     )
 
