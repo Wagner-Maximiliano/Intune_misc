@@ -58,6 +58,24 @@ Scope is **both toolsets in full** — see D-008.
       cannot be captured by a web UI..
 - [ ] Fix the garbled intro in `MDMWinsOverGPToolKit/README.md` (Known issue #2)
 
+### Additive work that needs no user input and no test run
+
+Sequenced here because it is safe to do *while* the Pester run and the R-11 /
+R-15 decisions are outstanding — all of it is new code paths or new tests,
+not changes to working behaviour. `docs/PROJECT_STATUS.md` carries the ordered
+list (items A–E) and the reasoning; keep the two in step.
+
+- [ ] Extend the test suite to `MDMWinsOverGPToolKit/` — its ~5,200 lines have
+      **no tests at all** today, while `scripts/` now has real coverage
+      (Known issue #12). Pure functions first, then parsers against fixtures.
+- [ ] **Deletion detection** — report policies that existed in the previous
+      run and no longer do. Report-only, never auto-act. The product's stated
+      core anxiety, and currently nothing implements it.
+- [ ] Capture `roleScopeTagIds` and `templateReference` in snapshots.
+      **Time-sensitive** — history captured before this cannot be backfilled.
+- [ ] Warn (don't block) when a snapshot contains secret-typed settings that
+      cannot round-trip through restore.
+
 **Done when**: every script's logic is importable and unit-tested, the test
 suite fails if production code breaks, and both toolsets share one logging
 and configuration mechanism.

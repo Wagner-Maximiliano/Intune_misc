@@ -20,6 +20,15 @@ Paste this into a fresh session:
 > follow it. Work on the next item in `docs/PROJECT_STATUS.md` unless I tell
 > you otherwise.
 
+**Where "the next item" is defined.** `docs/PROJECT_STATUS.md` → "Next up" has
+a section headed **"⚡ Ready now — an agent can do these with no user input"**.
+Take the top unfinished item from that list. It also has a **"⛔ Do NOT start
+these yet"** section — respect it; those items look ready but are blocked on a
+test run that has never happened.
+
+If the Ready-now list is empty, stop and ask rather than inventing work or
+starting something from the blocked list.
+
 **The branch step is not optional.** All project documentation lives on
 `claude/platform-bootstrap`, which is unmerged — `main` has no `docs/` folder
 at all. A session started on `main` sees none of this and will improvise.

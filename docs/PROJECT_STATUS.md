@@ -107,21 +107,61 @@ Full documentation: `MDMWinsOverGPToolKit/README.md`.
 | 3 | Extract shared `Continuum.*` modules | [#15](https://github.com/Wagner-Maximiliano/Intune_misc/issues/15) | #13 ✅, #14 ✅ |
 | 4 | Fix garbled `MDMWinsOverGPToolKit/README.md` intro | [#16](https://github.com/Wagner-Maximiliano/Intune_misc/issues/16) | — (independent) |
 
-**Finish #14 first, then start #15.** #14's code is written and committed, but
-its last acceptance criterion — "a deliberate break in a production script
-causes a test failure" — needs an interpreter, so it is still open. Closing it
-is two steps:
+---
+
+### ⚡ Ready now — an agent can do these with no user input
+
+**If you are a fresh session and the user has not told you otherwise, start at
+the top of this list and work down.** Everything here is either additive (new
+code paths, no change to working behaviour) or documentation-only, so none of
+it needs the Pester suite to have been run first. Take one item, finish it
+properly, update the docs, commit.
+
+| Order | Task | Why it's safe to do now |
+|---|---|---|
+| **A** | **Fix the garbled `MDMWinsOverGPToolKit/README.md` intro** ([#16](https://github.com/Wagner-Maximiliano/Intune_misc/issues/16)) | Documentation only, zero code risk. Constraint: fix **only** the damaged intro (~first 120 lines); the rest of that file is accurate and must not be rewritten. |
+| **B** | **Extend the test suite to `MDMWinsOverGPToolKit/`** (known issue #12) | Purely additive — new test files cannot break production code. The toolkit's ~5,200 lines currently have **no tests at all**, while `scripts/` now has real coverage. Start with the pure functions (`Get-TokenSet`, `Get-JaccardScore`, `Normalize-PolicyName`, `Convert-ValueToText`) which need no device access, then the ADMX/HTML parsers against fixture files. |
+| **C** | **Deletion detection** (new capability — see `PRODUCT-VISION.md` §6) | Net-new code path; nothing existing changes behaviour. Compare each run's policy set against the manifest's known set and report anything that vanished. **Report only — never auto-delete or auto-restore.** This is the product's core anxiety ("Intune has no recovery for deleted policies") and nothing currently says *"this existed last run and doesn't now."* Add a `-Skip`ped test per D-013 if any part needs a decision. |
+| **D** | **Capture `roleScopeTagIds` and `templateReference` in snapshots** | Two real Graph fields the backup silently drops. Additive to the snapshot shape. **Time-sensitive:** history captured before this lands can never be backfilled, so earlier is strictly better. |
+| **E** | **Warn when a snapshot contains secret-typed settings** | Graph never returns secret values on read, so a restored policy's password/certificate field is silently blank. Scan for `@odata.type` containing `Secret` and **warn, don't block**. Small, additive, and a trust requirement for restore. |
+
+Items C, D and E each want a matching test, since the suite now exercises real
+code (D-012). Write the test even though you cannot run it — say plainly in
+your final message that it is unverified.
+
+---
+
+### ⛔ Do NOT start these yet
+
+**#15 (module extraction) is blocked in practice, even though its table row
+says its dependencies are met.** The suite that makes a refactor
+trustworthy **has never actually been executed** — see "Needs verification"
+below. Extracting modules is a large, behaviour-preserving refactor whose
+entire safety argument rests on that suite going green first. Starting it now
+means a big unverifiable diff on top of an unverified safety net.
+
+Same reasoning for two other tempting items: **unifying logging** (61
+`Write-Host` calls in `scripts/`) and the **`_Index.xlsx` merge-not-wipe fix**.
+Both change working code in ways the suite would need to catch.
+
+Wait for the user's Pester run. Do items A–E instead.
+
+---
+
+### Closing #14 — needs the user, two steps
+
+#14's code is written and committed, but its last acceptance criterion — "a
+deliberate break in a production script causes a test failure" — needs a
+PowerShell interpreter:
 
 1. `Invoke-Pester ./tests` and fix whatever the first real run turns up.
 2. Mutate something in `scripts/` on purpose (change a `.Trim()` in
    `Get-SafeFileName`, or drop the `Where-Object { $_ }` at
    `Backup-IntunePolicies.ps1:671`) and confirm the suite goes red, then revert.
 
-See "Needs verification" below.
+---
 
-#15 is now much safer than it was: the suite runs the shipped code, so a
-refactor that changes behaviour shows up rather than passing silently. Two
-things to carry into it, both already scaffolded:
+When #15 does become unblocked, two things are already scaffolded for it:
 
 - `tests/TestSupport.ps1`'s AST loader is **temporary**. When the logic moves
   into `Continuum.*`, replace `Import-ProductionFunction` with `Import-Module`;
@@ -135,12 +175,14 @@ things to carry into it, both already scaffolded:
   collapse into `Continuum.Core`, they become redundant and should be deleted
   rather than left asserting a tautology.
 
-**#16 is still independent** and small — a good warm-up for a short session.
+**Three things are waiting on the user.** None of them block items A–E above:
 
-**Two decisions are still waiting on the user**: R-11 (when to adopt
-StrictMode in `scripts/`) and R-15 (a content-hash fix that would re-ingest
-affected policies once). Both are in `docs/REVIEW-PHASE0.md`. Don't act on
-either unilaterally.
+1. **The Pester run** that closes #14 (two steps, just above).
+2. **R-11** — when to adopt `Set-StrictMode` in `scripts/`.
+3. **R-15** — a content-hash fix that would re-ingest affected policies once.
+
+R-11 and R-15 are both in `docs/REVIEW-PHASE0.md`. Don't act on either
+unilaterally.
 
 **R-06 (fleet exit-code contract) is now decided — leave it alone.** The user
 declined the recommended fix: the fleet script's exit codes are a contract
