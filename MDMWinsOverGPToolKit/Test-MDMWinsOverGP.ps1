@@ -748,17 +748,106 @@ function Get-FirstNodeText {
         # as "no value supplied," even though every call site here always
         # passes a non-empty literal - this is defensive, matching the
         # blanket rule this toolkit follows for every Mandatory array param.
-        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$LocalNames
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$LocalNames,
+
+        # Skips any candidate that sits inside the setting's <GPO> reference
+        # subtree. RSoP nests the winning GPO's own identity under each
+        # setting as <GPO><Name>..</Name><Identifier>..</Identifier></GPO>,
+        # and several of the element names callers search for here ('Name',
+        # 'Path', 'Value') also occur in there. Without this, a setting whose
+        # own element is missing (say) <Name> silently picks up the GPO's
+        # name instead, and a setting with no registry key picks up the GPO's
+        # <Path> - which contains the GPO GUID, not a registry path. Callers
+        # reading setting-level fields should always pass this; the GPO's
+        # identity is read separately by Get-GpoIdentity below.
+        [switch]$ExcludeGpoSubtree
     )
 
+    # The exclusion predicate below tests ancestors document-wide, not just
+    # within $Node's own subtree. If $Node itself sits inside a <GPO> element,
+    # every candidate under it would inherit that ancestor and be filtered
+    # out, emptying the whole row. No known GPResult layout nests settings
+    # that way, but falling back to an unfiltered search is the safe response
+    # if one ever does - a slightly less precise value beats no value.
+    $excluding = [bool]$ExcludeGpoSubtree
+    if ($excluding -and $Node.SelectSingleNode("ancestor-or-self::*[local-name()='GPO']")) {
+        $excluding = $false
+    }
+
     foreach ($name in $LocalNames) {
-        $match = $Node.SelectSingleNode(".//*[local-name()='$name']")
+        $xpath =
+            if ($excluding) {
+                ".//*[local-name()='$name' and not(ancestor-or-self::*[local-name()='GPO'])]"
+            }
+            else {
+                ".//*[local-name()='$name']"
+            }
+
+        $match = $Node.SelectSingleNode($xpath)
         if ($match -and -not [string]::IsNullOrWhiteSpace($match.InnerText)) {
             return $match.InnerText.Trim()
         }
     }
 
     return ''
+}
+
+# Reads the winning GPO's name and GUID for a single RSoP setting node.
+#
+# gpresult.exe /x emits RSoP XML in which every applied setting carries its
+# own <GPO> child holding both <Name> (the friendly GPO name) and
+# <Identifier> (the GPO GUID) - so the name-to-GUID binding is already
+# present in the evidence this toolkit collects, per setting.
+#
+# This has to be read with element-scoped XPath rather than
+# Get-FirstNodeText's InnerText shortcut: InnerText on the <GPO> element
+# concatenates every descendant text node, which glues the name and the GUID
+# into a single unusable string ("Default Domain Policy{31B2F340-...}").
+# Reading <Name> and <Identifier> as distinct nodes is what keeps them
+# separable - and the GUID is the only stable GPO join key, since two GPOs
+# in a forest may share a display name.
+#
+# <Identifier> is searched with a descendant axis because RSoP puts it
+# directly under <GPO> for a per-setting reference but under <GPO><Path> in
+# the top-level GPO list; <Name> is preferred as a direct child so a nested
+# element cannot shadow it. Returns empty strings (never $null, never
+# throws) when the XML does not carry a GPO reference - older/partial
+# GPResult exports and non-registry policy extensions legitimately omit it.
+function Get-GpoIdentity {
+    param([Parameter(Mandatory)][System.Xml.XmlNode]$Node)
+
+    $identity = [pscustomobject]@{
+        Name = ''
+        Id   = ''
+    }
+
+    $gpoNode = $Node.SelectSingleNode(".//*[local-name()='GPO']")
+
+    if ($gpoNode) {
+        $nameNode = $gpoNode.SelectSingleNode("./*[local-name()='Name']")
+        if (-not $nameNode) {
+            $nameNode = $gpoNode.SelectSingleNode(".//*[local-name()='Name']")
+        }
+        if ($nameNode -and -not [string]::IsNullOrWhiteSpace($nameNode.InnerText)) {
+            $identity.Name = $nameNode.InnerText.Trim()
+        }
+
+        $idNode = $gpoNode.SelectSingleNode(".//*[local-name()='Identifier']")
+        if ($idNode -and -not [string]::IsNullOrWhiteSpace($idNode.InnerText)) {
+            $identity.Id = $idNode.InnerText.Trim()
+        }
+    }
+
+    # Legacy/non-RSoP GPResult shapes that name the GPO inline instead of
+    # nesting a <GPO> element. These never carry a GUID, so Id stays empty
+    # rather than being guessed at.
+    if ([string]::IsNullOrWhiteSpace($identity.Name)) {
+        $identity.Name = Get-FirstNodeText -Node $Node -LocalNames @(
+            'GPOName','WinningGPO','SOMName'
+        )
+    }
+
+    return $identity
 }
 
 # Parses GPResult.xml into flat rows of candidate GPO-applied settings.
@@ -789,7 +878,11 @@ function Get-GpResultPolicyRows {
     )
 
     foreach ($node in $candidateNodes) {
-        $settingName = Get-FirstNodeText -Node $node -LocalNames @(
+        # Every setting-level read below excludes the <GPO> reference subtree
+        # (see Get-FirstNodeText -ExcludeGpoSubtree): the GPO's own <Name> and
+        # <Path> live in there and would otherwise be misread as the setting's
+        # name and registry key.
+        $settingName = Get-FirstNodeText -Node $node -ExcludeGpoSubtree -LocalNames @(
             'Name','PolicyName','SettingName','DisplayName','KeyName'
         )
 
@@ -799,23 +892,21 @@ function Get-GpResultPolicyRows {
             }
         }
 
-        $state = Get-FirstNodeText -Node $node -LocalNames @(
+        $state = Get-FirstNodeText -Node $node -ExcludeGpoSubtree -LocalNames @(
             'State','Setting','Value','PolicyState'
         )
 
-        $gpoName = Get-FirstNodeText -Node $node -LocalNames @(
-            'GPOName','GPO','WinningGPO','SOMName'
-        )
+        $gpoIdentity = Get-GpoIdentity -Node $node
 
-        $category = Get-FirstNodeText -Node $node -LocalNames @(
+        $category = Get-FirstNodeText -Node $node -ExcludeGpoSubtree -LocalNames @(
             'Category','CategoryName','ExtensionName'
         )
 
-        $registryKey = Get-FirstNodeText -Node $node -LocalNames @(
+        $registryKey = Get-FirstNodeText -Node $node -ExcludeGpoSubtree -LocalNames @(
             'RegistryKey','KeyPath','Path'
         )
 
-        $registryValue = Get-FirstNodeText -Node $node -LocalNames @(
+        $registryValue = Get-FirstNodeText -Node $node -ExcludeGpoSubtree -LocalNames @(
             'RegistryValue','ValueName'
         )
 
@@ -824,7 +915,8 @@ function Get-GpResultPolicyRows {
 
             $rows.Add([pscustomobject]@{
                 GpoSetting    = $settingName
-                GpoName       = $gpoName
+                GpoName       = $gpoIdentity.Name
+                GpoId         = $gpoIdentity.Id
                 State         = $state
                 Category      = $category
                 RegistryKey   = $registryKey
@@ -834,8 +926,11 @@ function Get-GpResultPolicyRows {
         }
     }
 
+    # GpoId participates in the uniqueness key: two GPOs in the same forest
+    # can share a display name, and collapsing them by name alone would
+    # silently drop one of the two GUIDs.
     return $rows.ToArray() |
-        Sort-Object GpoSetting, GpoName, RegistryKey, RegistryValue -Unique
+        Sort-Object GpoSetting, GpoName, GpoId, RegistryKey, RegistryValue -Unique
 }
 
 # Decodes the small, fixed set of HTML entities MdmDiagnosticsTool.exe's own
@@ -1119,10 +1214,64 @@ function Get-JaccardScore {
     return [math]::Round($intersection.Count / $union.Count, 3)
 }
 
+# Reconstructs the Policy CSP OMA-URI for a PolicyManager registry value.
+#
+# The effective PolicyManager store mirrors the Policy CSP namespace on disk
+# as ...\PolicyManager\current\<device|user>\<Area>, with one registry value
+# per policy - so a row's OMA-URI can be rebuilt from its registry path plus
+# its value name, with no mapping CSV and no network call:
+#
+#   HKLM\...\PolicyManager\current\device\Update + AllowAutoUpdate
+#     -> ./Device/Vendor/MSFT/Policy/Config/Update/AllowAutoUpdate
+#
+# This matters because OmaUri on an overlap row is otherwise populated only
+# from a -MappingCsv, i.e. it is empty on every row of a default run - which
+# is exactly the field needed to join these results to an Intune Settings
+# Catalog export (settingDefinitionId is this same URI in underscore form).
+#
+# Derivation is deliberately anchored to exactly one key segment after the
+# scope: that is the shape the Policy CSP actually has (Config/<Area>/<Policy>).
+# Anything deeper or shallower - the store's own root values, or a vendor
+# subtree that does not follow this layout - returns an empty string rather
+# than a plausible-looking URI that was really a guess.
+function Get-PolicyManagerOmaUri {
+    param(
+        [string]$RegistryPath,
+        [string]$ValueName
+    )
+
+    if ([string]::IsNullOrWhiteSpace($RegistryPath) -or
+        [string]::IsNullOrWhiteSpace($ValueName)) {
+        return ''
+    }
+
+    $match = [regex]::Match(
+        $RegistryPath,
+        '\\PolicyManager\\current\\(?<scope>device|user)\\(?<area>[^\\]+)$',
+        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+    )
+
+    if (-not $match.Success) { return '' }
+
+    $scopeSegment =
+        if ($match.Groups['scope'].Value -ieq 'user') { 'User' } else { 'Device' }
+
+    return "./$scopeSegment/Vendor/MSFT/Policy/Config/$($match.Groups['area'].Value)/$ValueName"
+}
+
 # Collapses the flat PolicyManager registry rows (one row per value,
 # including the internal *_ProviderSet and *_WinningProvider companion
 # values) into one row per effective policy, with its winning provider
 # and pre-computed name tokens attached for the overlap matching below.
+#
+# Note on the Area/Policy fields inherited from Get-RegistryTreeValues:
+# those are generic registry-shape labels (Area = the parent key's leaf,
+# Policy = the key's own leaf), NOT Policy CSP terms. For the standard
+# ...\current\device\<Area> layout that makes Area = 'device' and Policy =
+# the real CSP area, with the real CSP policy name in ValueName. The
+# CspArea/CspPolicy/OmaUri fields added below carry the actual CSP identity
+# and are what callers should join on; the originals are left untouched so
+# PolicyManager-AllValues.csv keeps round-tripping through replay unchanged.
 function Get-MdmPolicyRows {
     param([object[]]$RegistryRows)
 
@@ -1158,11 +1307,19 @@ function Get-MdmPolicyRows {
             } |
             Select-Object -First 1
 
+        $omaUri = Get-PolicyManagerOmaUri -RegistryPath $first.RegistryPath -ValueName $first.ValueName
+
         [pscustomobject]@{
             Scope           = $first.Scope
             Area            = $first.Area
             Policy          = $first.Policy
             ValueName       = $first.ValueName
+            # The real Policy CSP identity, as opposed to the registry-shape
+            # Area/Policy above. Empty when the key does not follow the
+            # Config/<Area>/<Policy> layout (see Get-PolicyManagerOmaUri).
+            CspArea         = if ($omaUri) { $first.Policy } else { '' }
+            CspPolicy       = if ($omaUri) { $first.ValueName } else { '' }
+            OmaUri          = $omaUri
             EffectiveValue  = $first.Value
             RegistryPath    = $first.RegistryPath
             ProviderSet     = if ($providerSet) { $providerSet.Value } else { '' }
@@ -1300,6 +1457,30 @@ function Invoke-PolicyMappingsGenerator {
     }
 }
 
+# Collapses one property across a set of rows into a single de-duplicated,
+# '; '-joined string. Used for the MDM-side columns of an overlap row, where
+# a mapping can legitimately match more than one PolicyManager value.
+#
+# This is lossy by design - it cannot express which value pairs with which
+# path - which is precisely why every row that uses it also carries
+# MdmMatchCount. A row with MdmMatchCount = 1 can be read field-by-field;
+# above 1, the joined columns are a summary and the underlying rows must be
+# read from MDM-EffectivePolicies.csv before drawing conclusions.
+function Join-DistinctProperty {
+    param(
+        [object[]]$Rows,
+        [Parameter(Mandatory)][string]$PropertyName
+    )
+
+    if (-not $Rows) { return '' }
+
+    return (
+        @($Rows | ForEach-Object { $_.$PropertyName }) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+        Sort-Object -Unique
+    ) -join '; '
+}
+
 # For EVERY GPO setting actually applied on this device (from GPResult),
 # left-joins it to the optional -MappingCsv and to MDM evidence, and
 # produces a report row with a plain-English status. This is an inversion of
@@ -1316,8 +1497,13 @@ function Invoke-PolicyMappingsGenerator {
 #     be the common case (most GPO settings have no documented Policy CSP
 #     equivalent), not an error condition.
 # GPResult can yield the same setting more than once (e.g. across categories
-# or policy extensions), so rows are deduplicated by (GpoSetting, GpoName)
-# before the join.
+# or policy extensions), so rows are deduplicated by
+# (GpoSetting, GpoName, GpoId) before the join.
+#
+# Each row carries the GPO-side and MDM-side join keys - GpoId, the GPO
+# registry coordinate, and the reconstructed OMA-URI - so that
+# Verified-Overlap-Results.csv can be joined onward without having to go
+# back to GPO-Settings.csv and MDM-EffectivePolicies.csv by fuzzy name.
 function Get-VerifiedOverlapRows {
     param(
         [object[]]$Mappings,
@@ -1325,10 +1511,13 @@ function Get-VerifiedOverlapRows {
         [object[]]$MdmRows
     )
 
+    # GpoId is part of the dedup key alongside the display name: two GPOs can
+    # share a display name, and grouping by name alone would discard one of
+    # them (Select-Object -First 1) and attribute its settings to the other.
     $distinctGpoRows = @(
         $GpoRows |
         Where-Object { -not [string]::IsNullOrWhiteSpace($_.GpoSetting) } |
-        Group-Object GpoSetting, GpoName |
+        Group-Object GpoSetting, GpoName, GpoId |
         ForEach-Object { $_.Group | Select-Object -First 1 }
     )
 
@@ -1349,8 +1538,27 @@ function Get-VerifiedOverlapRows {
         if ($mapping) {
             $matchingMdm = @(
                 $MdmRows | Where-Object {
-                    $_.Area -eq $mapping.CspArea -and
-                    ($_.Policy -eq $mapping.CspPolicy -or $_.ValueName -eq $mapping.CspPolicy)
+                    # Match on the resolved Policy CSP identity. The older
+                    # condition compared the mapping's CspArea against the
+                    # row's Area field, but Area is a registry-shape label
+                    # (the parent key's leaf), so for the standard
+                    # ...\current\device\<Area> layout it holds the literal
+                    # string 'device' - meaning a mapping row naming a real
+                    # CSP area such as 'Update' could never match, and
+                    # "Confirmed overlap" was effectively unreachable. See
+                    # the field note on Get-MdmPolicyRows.
+                    (
+                        -not [string]::IsNullOrWhiteSpace($_.CspArea) -and
+                        $_.CspArea -eq $mapping.CspArea -and
+                        $_.CspPolicy -eq $mapping.CspPolicy
+                    ) -or
+                    # Legacy shape, kept so that any mapping CSV curated
+                    # against the previous field semantics still resolves
+                    # rather than silently losing its matches.
+                    (
+                        $_.Area -eq $mapping.CspArea -and
+                        ($_.Policy -eq $mapping.CspPolicy -or $_.ValueName -eq $mapping.CspPolicy)
+                    )
                 }
             )
         }
@@ -1381,12 +1589,24 @@ function Get-VerifiedOverlapRows {
             MdmConfigured     = $mdmConfigured
             GpoSetting        = $gpo.GpoSetting
             GpoName           = $gpo.GpoName
+            GpoId             = $gpo.GpoId
             GpoState          = $gpo.State
+            GpoCategory       = $gpo.Category
+            GpoRegistryKey    = $gpo.RegistryKey
+            GpoRegistryValue  = $gpo.RegistryValue
             CspArea           = if ($mapping) { $mapping.CspArea } else { '' }
             CspPolicy         = if ($mapping) { $mapping.CspPolicy } else { '' }
-            MdmEffectiveValue = (@($matchingMdm | ForEach-Object { $_.EffectiveValue }) | Where-Object { $_ } | Sort-Object -Unique) -join '; '
-            WinningProvider   = (@($matchingMdm | ForEach-Object { $_.WinningProvider }) | Where-Object { $_ } | Sort-Object -Unique) -join '; '
             OmaUri            = if ($mapping) { $mapping.OmaUri } else { '' }
+            DerivedOmaUri     = Join-DistinctProperty -Rows $matchingMdm -PropertyName 'OmaUri'
+            MdmScope          = Join-DistinctProperty -Rows $matchingMdm -PropertyName 'Scope'
+            MdmValueName      = Join-DistinctProperty -Rows $matchingMdm -PropertyName 'ValueName'
+            MdmRegistryPath   = Join-DistinctProperty -Rows $matchingMdm -PropertyName 'RegistryPath'
+            MdmProviderSet    = Join-DistinctProperty -Rows $matchingMdm -PropertyName 'ProviderSet'
+            MdmEffectiveValue = Join-DistinctProperty -Rows $matchingMdm -PropertyName 'EffectiveValue'
+            WinningProvider   = Join-DistinctProperty -Rows $matchingMdm -PropertyName 'WinningProvider'
+            # Guards the '; '-joined columns above: only at 1 can they be
+            # read as a single coherent policy (see Join-DistinctProperty).
+            MdmMatchCount     = $matchingMdm.Count
             Status            = $status
             Notes             = if ($mapping) { $mapping.Notes } else { '' }
         }
@@ -1440,6 +1660,9 @@ function Get-HeuristicOverlapRows {
         }
 
         if ($best -and $bestScore -ge $MinimumScore) {
+            # Same column shape as Get-VerifiedOverlapRows: both feed the same
+            # HTML table definitions and are read side by side as CSVs, so the
+            # two must be kept in step whenever either gains a field.
             $results.Add([pscustomobject]@{
                 MatchType         = 'Heuristic candidate'
                 Confidence        = $bestScore
@@ -1447,12 +1670,30 @@ function Get-HeuristicOverlapRows {
                 MdmConfigured     = $true
                 GpoSetting        = $gpo.GpoSetting
                 GpoName           = $gpo.GpoName
+                GpoId             = $gpo.GpoId
                 GpoState          = $gpo.State
-                CspArea           = $best.Area
-                CspPolicy         = $best.Policy
+                GpoCategory       = $gpo.Category
+                GpoRegistryKey    = $gpo.RegistryKey
+                GpoRegistryValue  = $gpo.RegistryValue
+                # Prefer the resolved CSP identity, falling back to the
+                # registry-shape labels for keys that do not follow the
+                # Config/<Area>/<Policy> layout - which is all the older code
+                # ever reported here.
+                CspArea           = if ($best.CspArea) { $best.CspArea } else { $best.Area }
+                CspPolicy         = if ($best.CspPolicy) { $best.CspPolicy } else { $best.Policy }
+                # OmaUri stays empty: it means "asserted by a verified
+                # mapping", and there is no mapping behind a heuristic row.
+                # The reconstructed URI goes in DerivedOmaUri, where it is
+                # only ever as good as the name-similarity match above.
+                OmaUri            = ''
+                DerivedOmaUri     = $best.OmaUri
+                MdmScope          = $best.Scope
+                MdmValueName      = $best.ValueName
+                MdmRegistryPath   = $best.RegistryPath
+                MdmProviderSet    = $best.ProviderSet
                 MdmEffectiveValue = $best.EffectiveValue
                 WinningProvider   = $best.WinningProvider
-                OmaUri            = ''
+                MdmMatchCount     = 1
                 Status            = 'Candidate only. Confirm the Microsoft CSP mapping before treating this as a conflict.'
                 Notes             = "Name similarity score: $bestScore"
             })
@@ -2138,8 +2379,8 @@ $blockedGpTopSection
 <h2>Heuristic overlap candidates</h2>
 <p>These are name-similarity candidates only, not verified mappings - see the "Candidate only. Confirm the Microsoft CSP mapping before treating this as a conflict." status on every row below, which stays exactly true regardless of how this section is styled. This section is highlighted because, in real-world use, these unverified candidates have frequently turned out to correspond to actual confirmed conflicts once manually reviewed - so treat them as high-priority items to check first, not as proof on their own. Sort any column by clicking its header; filter by CspArea or WinningProvider below the table.</p>
 $(Convert-ObjectsToHtmlTable -Rows ($HeuristicRows | Select-Object -First 250) -Properties @(
-    'Confidence','GpoSetting','GpoName','GpoState','CspArea','CspPolicy',
-    'MdmEffectiveValue','WinningProvider','Status'
+    'Confidence','GpoSetting','GpoName','GpoId','GpoState','CspArea','CspPolicy',
+    'DerivedOmaUri','MdmEffectiveValue','WinningProvider','Status'
 ) -Interactive -TableId 'heuristic-overlap-table' `
   -ColumnSortTypes @{ Confidence = 'number' } `
   -FilterColumns @('CspArea','WinningProvider') -StatusColumn 'Status')
@@ -2153,10 +2394,10 @@ $(Convert-ObjectsToHtmlTable -Rows @($ConflictState) -Properties @(
 ))
 
 <h2>Applied GPO settings and CSP mapping status</h2>
-<p>Every GPO setting GPResult reported as applied on this device, left-joined to the optional mapping CSV and to MDM evidence. Most rows are expected to show "No known CSP mapping" - that reflects real Policy CSP coverage, not a collection error. Sort any column by clicking its header; filter by Status or WinningProvider below the table.</p>
+<p>Every GPO setting GPResult reported as applied on this device, left-joined to the optional mapping CSV and to MDM evidence. Most rows are expected to show "No known CSP mapping" - that reflects real Policy CSP coverage, not a collection error. GpoId is the winning GPO's GUID as reported by GPResult, and is the reliable way to tell apart two GPOs that share a display name. DerivedOmaUri is reconstructed from the PolicyManager registry path rather than asserted by a mapping. Where MdmMatchCount is greater than 1 the MDM value and provider columns are a combined summary of several policies - open Verified-Overlap-Results.csv and MDM-EffectivePolicies.csv before reading them as one setting. Sort any column by clicking its header; filter by Status or WinningProvider below the table.</p>
 $(Convert-ObjectsToHtmlTable -Rows $VerifiedRows -Properties @(
-    'GpoSetting','GpoName','GpoState','CspArea','CspPolicy',
-    'MdmEffectiveValue','WinningProvider','Status','Notes'
+    'GpoSetting','GpoName','GpoId','GpoState','CspArea','CspPolicy',
+    'DerivedOmaUri','MdmEffectiveValue','WinningProvider','MdmMatchCount','Status','Notes'
 ) -EmptyMessage 'No GPO settings were found in GPResult for this device.' `
   -Interactive -TableId 'applied-gpo-settings-table' `
   -FilterColumns @('Status','WinningProvider') -StatusColumn 'Status')
@@ -2658,8 +2899,13 @@ try {
 
     $mdmRows = @(Get-MdmPolicyRows -RegistryRows $mdmRegistryRows)
     Write-Log -Message "Found $($mdmRows.Count) effective PolicyManager policy row(s)."
+    # CspArea/CspPolicy/OmaUri are exported alongside the registry-shape
+    # fields so this CSV can be joined directly to an Intune Settings Catalog
+    # export, whose settingDefinitionId is this same OMA-URI in underscore
+    # form. Tokens/NormalizedName are internal to the matching above and are
+    # deliberately not exported.
     $mdmRows |
-        Select-Object Scope,Area,Policy,ValueName,EffectiveValue,RegistryPath,ProviderSet,WinningProvider |
+        Select-Object Scope,Area,Policy,ValueName,CspArea,CspPolicy,OmaUri,EffectiveValue,RegistryPath,ProviderSet,WinningProvider |
         Export-Csv -LiteralPath (Join-Path $folders.Reports 'MDM-EffectivePolicies.csv') `
         -NoTypeInformation -Encoding UTF8
 

@@ -124,6 +124,42 @@ itself is created)
 - MDMDiagnostics\ (including MdmDiagnosticsTool.exe's own MDMDiagReport.html)
 - A ZIP containing the full evidence package, optionally also copied to `-ResultsShare` (see below)
 
+## Join keys: GPO GUIDs and reconstructed OMA-URIs
+
+`Verified-Overlap-Results.csv` and `Heuristic-Overlap-Candidates.csv` carry
+the identifiers needed to aggregate these results with other data sources,
+rather than only human-readable names:
+
+| Column | Meaning |
+| --- | --- |
+| `GpoId` | The winning GPO's GUID, as reported by GPResult's own RSoP XML. This is the only stable GPO identifier - two GPOs in a forest may share a display name, so `GpoName` alone is not a safe key. Empty when the GPResult export carried no GPO reference for that setting. |
+| `GpoRegistryKey`, `GpoRegistryValue` | The classic policy registry coordinate for the setting. This is the exact-match key for joining to `ClassicPolicyRegistry.csv`, and the strongest available basis for relating a row to `Blocked-GroupPolicies.csv` (see the caveat below). |
+| `GpoCategory`, `GpoState` | The setting's category and its applied state, as GPResult reported them. |
+| `DerivedOmaUri` | The Policy CSP OMA-URI, reconstructed from the PolicyManager registry path (`...\current\<device\|user>\<Area>` plus the value name). Unlike `OmaUri`, this is populated without a mapping CSV. Empty for registry keys that do not follow the `Config/<Area>/<Policy>` layout. |
+| `OmaUri` | The OMA-URI **asserted by a verified mapping row**. Empty on heuristic rows and on any run without `-MappingCsv` - it means "a mapping claims this", not "this was observed". |
+| `MdmScope`, `MdmValueName`, `MdmRegistryPath`, `MdmProviderSet` | Where the MDM side of the row came from, and which provider set the value. |
+| `MdmMatchCount` | How many PolicyManager policies the mapping matched. **Read this before reading the MDM columns**: at 1 the row describes a single policy; above 1, `MdmEffectiveValue`, `WinningProvider` and the `Mdm*` columns are `; `-joined summaries across several policies and cannot be paired up with each other. Resolve those rows against `MDM-EffectivePolicies.csv`. |
+
+`MDM-EffectivePolicies.csv` gains the same `CspArea`, `CspPolicy` and
+`OmaUri` columns. Note that its older `Area` and `Policy` columns are
+registry-shape labels, not CSP terms - for the standard layout `Area` holds
+the literal string `device` or `user`, and the real CSP area is in `Policy`.
+Join on `CspArea`/`CspPolicy`/`OmaUri`.
+
+`DerivedOmaUri` is what makes these results joinable to an Intune Settings
+Catalog export: a settings catalog `settingDefinitionId` is this same URI in
+lowercase underscore form (`./Device/Vendor/MSFT/Policy/Config/Update/AllowAutoUpdate`
+corresponds to `device_vendor_msft_policy_config_update_allowautoupdate`).
+See `scripts/Get-IntuneSettingsCatalogSnapshot.ps1` in this repository for
+producing that export.
+
+**Caveat on binding these to blocked GPOs.** `Blocked-GroupPolicies.csv` is a
+verbatim re-export of Windows' own table and contains no GPO name, GUID, or
+Intune policy reference - Windows does not emit one. Relating a blocked row
+to a `GpoId` therefore always means joining through one of the columns above
+(the registry coordinate being the strongest), and the result is an
+inference, not something Windows stated. Treat it accordingly.
+
 ## Blocked Group Policies (authoritative evidence)
 
 `MdmDiagnosticsTool.exe` (run automatically unless `-SkipMdmDiagnostics` is
