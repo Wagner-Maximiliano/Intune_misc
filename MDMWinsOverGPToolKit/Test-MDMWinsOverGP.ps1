@@ -1643,7 +1643,7 @@ function Convert-ObjectsToHtmlTable {
             }
 
             $labelText = ConvertTo-HtmlEncoded $filterColumn
-            "<label class=""filter-label"">$labelText: <select class=""table-filter"" data-filter-table=""$(ConvertTo-HtmlEncoded $TableId)"" data-filter-col=""$colIndex""><option value="""">All</option>$($optionTags -join '')</select></label>"
+            "<label class=""filter-label"">${labelText}: <select class=""table-filter"" data-filter-table=""$(ConvertTo-HtmlEncoded $TableId)"" data-filter-col=""$colIndex""><option value="""">All</option>$($optionTags -join '')</select></label>"
         }
 
         if ($filterControls) {
