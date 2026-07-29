@@ -15,6 +15,13 @@
 # See Backup.Functions.Tests.ps1: scripts/ has no StrictMode (R-01).
 Set-StrictMode -Off
 
+# Pester 6 rejects a BeforeEach/AfterEach directly in the file root ("Each
+# test setup is not supported in root") - only BeforeAll/AfterAll are allowed
+# there. Wrapping the whole file in one outer Describe is a no-op for every
+# Describe already nested inside it, and keeps the file running unmodified
+# under Pester 5.
+Describe 'Get-IntuneSettingsCatalogSnapshot.ps1 end-to-end' {
+
 BeforeAll {
     . "$PSScriptRoot/TestSupport.ps1"
     $script:SnapshotScript = Get-ProductionScriptPath -Name 'Get-IntuneSettingsCatalogSnapshot.ps1'
@@ -141,4 +148,6 @@ Describe 'Get-IntuneSettingsCatalogSnapshot.ps1 - options' {
         $files.Count   | Should -Be 1
         $files[0].Name | Should -Be 'Base_Line_ Windows__p-slash.json'
     }
+}
+
 }

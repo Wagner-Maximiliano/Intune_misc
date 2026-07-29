@@ -19,16 +19,21 @@ Scope is **both toolsets in full** — see D-008.
       `scripts/`. Two live crashes fixed, plus three docs corrected for a
       false StrictMode/path-portability premise.
 - [ ] **Fix the test suite** so it exercises production code instead of
-      reimplementing it — **written, not yet run** (Issue #14, D-012).
-      `TestHelpers.ps1` and its 21 copies are gone; the suite loads real
-      function source by AST and runs whole scripts against an offline Graph
-      fake, and a guard test stops the copies returning. Writing it found and
-      fixed **R-13** (R-03's fix stopped one line short — a no-settings policy
-      still aborted) and **R-14** ("Last Modified By" was always blank). See
-      `tests/README.md`. **Remaining**: run `Invoke-Pester ./tests`, fix what
-      the first run turns up, and confirm a deliberate break in `scripts/`
-      turns the suite red. That last step is the Issue's own acceptance
-      criterion and needs an interpreter the agent sandbox does not have.
+      reimplementing it — **written; first real run happened 2026-07-29 and
+      found two harness bugs, both fixed, neither re-verified** (Issue #14,
+      D-012). `TestHelpers.ps1` and its 21 copies are gone; the suite loads
+      real function source by AST and runs whole scripts against an offline
+      Graph fake, and a guard test stops the copies returning. Writing it
+      found and fixed **R-13** (R-03's fix stopped one line short — a
+      no-settings policy still aborted) and **R-14** ("Last Modified By" was
+      always blank). The first real run found the suite didn't survive
+      Pester 6 (root-level `BeforeEach` unsupported there — fixed by wrapping
+      each file in one outer `Describe`) and, via its own parse check, a
+      genuine `Test-MDMWinsOverGP.ps1` parse failure (**R-16**, fixed). See
+      `tests/README.md`. **Remaining**: re-run `Invoke-Pester ./tests`, fix
+      what that turns up, and confirm a deliberate break in `scripts/` turns
+      the suite red. That last step is the Issue's own acceptance criterion
+      and needs an interpreter the agent sandbox does not have.
 - [ ] **Adopt `Set-StrictMode -Version 2.0` in `scripts/`** — the five files
       there have none. **Sequencing matters**: fix the latent findings first
       (R-05, R-09), or they all become crashes simultaneously. Best folded

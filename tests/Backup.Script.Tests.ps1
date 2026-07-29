@@ -24,6 +24,13 @@
 # (R-01), so the harness must not add one.
 Set-StrictMode -Off
 
+# Pester 6 rejects a BeforeEach/AfterEach directly in the file root ("Each
+# test setup is not supported in root") - only BeforeAll/AfterAll are allowed
+# there. Wrapping the whole file in one outer Describe is a no-op for every
+# Describe already nested inside it, and keeps the file running unmodified
+# under Pester 5.
+Describe 'Backup-IntunePolicies.ps1 end-to-end' {
+
 BeforeAll {
     . "$PSScriptRoot/TestSupport.ps1"
     $script:BackupScript = Get-ProductionScriptPath -Name 'Backup-IntunePolicies.ps1'
@@ -319,4 +326,6 @@ Describe 'Backup-IntunePolicies.ps1 - options' {
 
         $out | Should -Match 'Using existing Graph connection'
     }
+}
+
 }

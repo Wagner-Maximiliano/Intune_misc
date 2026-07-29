@@ -20,6 +20,13 @@
 # See Backup.Functions.Tests.ps1: scripts/ has no StrictMode (R-01).
 Set-StrictMode -Off
 
+# Pester 6 rejects a BeforeEach/AfterEach directly in the file root ("Each
+# test setup is not supported in root") - only BeforeAll/AfterAll are allowed
+# there. Wrapping the whole file in one outer Describe is a no-op for every
+# Describe already nested inside it, and keeps the file running unmodified
+# under Pester 5.
+Describe 'Restore-IntunePolicy.ps1 end-to-end' {
+
 BeforeAll {
     . "$PSScriptRoot/TestSupport.ps1"
     $script:RestoreScript = Get-ProductionScriptPath -Name 'Restore-IntunePolicy.ps1'
@@ -182,4 +189,6 @@ Describe 'Restore-IntunePolicy.ps1 - safety boundaries' {
         { & $script:RestoreScript -JsonFile $missing -WhatIf 6>&1 3>&1 | Out-Null } |
             Should -Throw '*not found*'
     }
+}
+
 }

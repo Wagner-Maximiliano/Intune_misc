@@ -27,6 +27,14 @@
 # Set-StrictMode -Version 2.0 and this suite becomes the tool that verifies it.
 Set-StrictMode -Off
 
+# Pester 6 rejects a BeforeEach/AfterEach directly in the file root ("Each
+# test setup is not supported in root") - only BeforeAll/AfterAll are allowed
+# there. Wrapping the whole file in one outer Describe is a no-op for every
+# Describe already nested inside it (their BeforeEach still runs after this
+# one, exactly as when this was the file root), and keeps the file running
+# unmodified under Pester 5.
+Describe 'Backup-IntunePolicies.ps1 functions' {
+
 BeforeAll {
     . "$PSScriptRoot/TestSupport.ps1"
 
@@ -397,4 +405,6 @@ Describe 'Get-StringSha256' {
         Get-StringSha256 -Text 'abc' |
             Should -Be 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'
     }
+}
+
 }

@@ -5,7 +5,8 @@ Update it in the same commit as any change. If this file and the code
 disagree, the code is right and this file is a bug.
 
 - **Last updated**: 2026-07-29
-- **Updated by**: session that rewrote the MDM toolkit README intro (Issue #16)
+- **Updated by**: two sessions today — one rewrote the MDM toolkit README intro
+  (Issue #16), the other fixed the two bugs the suite's first real run found
 - **Current phase**: Phase 0 — Bootstrap & consolidation (review and tests done,
   module extraction next)
 
@@ -207,18 +208,37 @@ The agent sandbox cannot run any of this. The user's testing is the project's
 only real verification, so **unverified changes are listed here until a real
 run confirms them**, then moved to "Recently shipped".
 
-### 1. Run the test suite — it has never been executed
+### 1. Run the test suite — first real run found two harness bugs, both fixed; re-run needed
 
 ```powershell
 Import-Module Pester -MinimumVersion 5.0
 Invoke-Pester ./tests
 ```
 
-**Roughly 1,200 lines of new test code, desk-checked only.** The agent sandbox
-has no PowerShell interpreter, so nothing in `tests/` has ever run. Expect to
-fix harness problems on the first pass — Pester scoping and PowerShell's
-`-like` wildcard rules are the likeliest culprits, not the assertions
-themselves. Needs no tenant, no credentials and no network.
+**The user ran this for the first time on 2026-07-29.** Two problems surfaced,
+both now fixed and pushed, **neither yet re-verified**:
+
+- **Pester 6 rejects a `BeforeEach`/`AfterEach` written directly at file scope**
+  ("Each test setup is not supported in root") — 5 of the 8 files used that
+  pattern, which Pester 5 allowed. Fixed by wrapping each file's whole body in
+  one outer `Describe`; root-level `BeforeAll`/`AfterAll` were never affected
+  and needed no change. See `tests/README.md` "Pester version" — **new test
+  files must follow this wrapped shape from the start.**
+- **`MDMWinsOverGPToolKit/Test-MDMWinsOverGP.ps1` did not parse at all** —
+  `SuiteIntegrity.Tests.ps1`'s parse check caught a real `$labelText:`
+  variable/colon ambiguity around line 1646 that made the entire script fail
+  to parse, not just the one function. Fixed by delimiting with `${labelText}`.
+  Recorded as **R-16** in `docs/REVIEW-PHASE0.md` — this is a genuinely new bug
+  class the Phase 0.1 review's three target classes didn't cover, found only
+  because the suite finally ran real PowerShell.
+
+**Ask the user to re-run `Invoke-Pester ./tests`** (their install is Pester
+6.0.1; both fixes are written to work on 5.x and 6.x — see `tests/README.md`).
+Their first run was 12 passed / 104 failed / 2 containers erroring outright
+from these two problems — expect that number to change substantially and
+**fix whatever the next real run turns up**, since the assertions themselves
+are still completely unverified. Needs no tenant, no credentials and no
+network.
 
 Two tests are `-Skip`ped **on purpose** and would fail if run: they assert the
 fixed behaviour for open findings R-08 and R-15. That is by design, not
@@ -252,7 +272,7 @@ change that alters *output* rather than just preventing a crash.
 ## Known issues / open threads
 
 Full detail for everything the Phase 0.1 review found — including the items
-already fixed — is in **`docs/REVIEW-PHASE0.md`**, indexed R-01…R-12.
+already fixed — is in **`docs/REVIEW-PHASE0.md`**, indexed R-01…R-16.
 
 1. ~~**The Pester tests don't test production code.**~~ **Fixed** (Issue #14).
    `tests/TestHelpers.ps1` and its 21 copies of production functions are gone.
@@ -260,8 +280,9 @@ already fixed — is in **`docs/REVIEW-PHASE0.md`**, indexed R-01…R-12.
    copies a function's real source out of the `.ps1`, and whole-script runs
    against an offline Graph fake — and `tests/SuiteIntegrity.Tests.ps1` fails
    if any test file ever redefines a production function name again. Full
-   rationale in `tests/README.md`. **Caveat: the suite has never been run**
-   (see "Needs verification" above).
+   rationale in `tests/README.md`. **Caveat: the suite's first real run (2026-07-29)
+   found two harness bugs (Pester 6 compatibility, and R-16 below); both are
+   fixed but not yet re-verified** — see "Needs verification" above.
 2. ~~**`MDMWinsOverGPToolKit/README.md` has a garbled intro section.**~~
    **Fixed** (Issue #16) — the first 126 lines were replaced; the rest of the
    file is untouched. See "Recently shipped".
@@ -327,11 +348,30 @@ already fixed — is in **`docs/REVIEW-PHASE0.md`**, indexed R-01…R-12.
     failures are invisible without `-Verbose`, hiding permission problems
     (R-10); one unguarded hashtable lookup in the fleet script is inconsistent
     with its guarded twin (R-12).
+14. ~~**`Test-MDMWinsOverGP.ps1` failed to parse at all.**~~ **Fixed** (R-16).
+    A `$labelText:` variable-immediately-followed-by-colon ambiguity around
+    line 1646 made the *entire script* fail to parse — not just the
+    interactive-table filter renderer it lived in. Invisible to desk-checking
+    (the review's own brace/paren check doesn't catch tokenizer ambiguity) and
+    invisible to the Phase 0.1 review's three target bug classes; found only
+    because the suite's parse check finally ran real PowerShell. Worth a
+    reminder: "the MDM toolkit was clean" (Phase 0.1 headline) meant clean on
+    the classes the review went looking for, not clean on everything.
 
 ---
 
 ## Recently shipped
 
+- **First real Pester run, and two harness bugs it found, both fixed**
+  (2026-07-29). The user's own Pester install resolved to 6.0.1, which
+  rejects a `BeforeEach`/`AfterEach` written directly at file scope — 5 of the
+  8 test files used that pattern. Fixed by wrapping each file's body in one
+  outer `Describe`, which changes nothing under Pester 5 and is required
+  under Pester 6; see `tests/README.md`. The run's parse check also caught a
+  genuine, previously-unknown defect: `Test-MDMWinsOverGP.ps1` failed to parse
+  at all because of a `$labelText:` variable/colon tokenizing ambiguity around
+  line 1646 (R-16, fixed). **Neither fix is re-verified yet — ask the user to
+  run `Invoke-Pester ./tests` again.**
 - **`MDMWinsOverGPToolKit/README.md`'s intro rewritten** (Issue #16, item A,
   D-015). The first 126 lines were chat-export debris: a `sandbox:` download
   link for a ZIP that does not exist, a file list naming a `README.txt` this

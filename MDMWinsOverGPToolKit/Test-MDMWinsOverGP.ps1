@@ -1643,7 +1643,12 @@ function Convert-ObjectsToHtmlTable {
             }
 
             $labelText = ConvertTo-HtmlEncoded $filterColumn
-            "<label class=""filter-label"">$labelText: <select class=""table-filter"" data-filter-table=""$(ConvertTo-HtmlEncoded $TableId)"" data-filter-col=""$colIndex""><option value="""">All</option>$($optionTags -join '')</select></label>"
+            # ${labelText}: not $labelText: - a variable immediately followed by
+            # a colon is parsed as an attempt at $scope:name syntax, and this
+            # colon is followed by a space rather than a valid name character,
+            # so the bare form fails to parse at all ("Variable reference is
+            # not valid"). Caught by SuiteIntegrity.Tests.ps1's parse check.
+            "<label class=""filter-label"">${labelText}: <select class=""table-filter"" data-filter-table=""$(ConvertTo-HtmlEncoded $TableId)"" data-filter-col=""$colIndex""><option value="""">All</option>$($optionTags -join '')</select></label>"
         }
 
         if ($filterControls) {

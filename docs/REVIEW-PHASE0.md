@@ -341,6 +341,40 @@ unguarded, while line 668 guards the identical lookup with `ContainsKey`. Not
 currently reachable (keys come from `$deviceNames`, sessions from a subset, and
 `@{}` is case-insensitive), but worth aligning.
 
+### R-16 — HIGH — `Test-MDMWinsOverGP.ps1` failed to parse at all — FIXED
+Found the first time `tests/` actually ran (`SuiteIntegrity.Tests.ps1`'s parse
+check, via `Get-ScriptFunctionDefinition`'s AST load), not by desk-check — this
+review's brace/paren check does not catch it because the file parses
+character-for-character fine; the defect is in how PowerShell tokenizes a
+`$variable` immediately followed by `:` inside a double-quoted string.
+
+Line ~1646 (the interactive-table column-filter renderer) had:
+
+```powershell
+"<label class=""filter-label"">$labelText: <select ...>"
+```
+
+`$labelText:` is ambiguous with `$scope:name` drive/scope-qualified variable
+syntax. Because a space (not a valid variable-name character) follows the
+colon, the parser rejects the whole script: `Variable reference is not valid.
+':' was not followed by a valid variable name character.` Since PowerShell
+parses an entire `.ps1` before running any of it, **this did not fail
+gracefully at the Interactive/FilterColumns code path — it broke the ability
+to run `Test-MDMWinsOverGP.ps1` at all**, evidence-collection and report
+rendering included.
+
+Fixed by delimiting explicitly: `${labelText}:`. Grepped the rest of the repo
+for the same `$word:` shape immediately followed by a non-identifier,
+non-`{`, non-`$` character — the only other hit is inside a `#` comment in
+`Backup-IntunePolicies.ps1`, which is inert.
+
+This revises the review's own headline above: **the MDM toolkit was clean on
+the three bug classes this review specifically went looking for, but not on
+every bug class** — this one is a fourth, found only because the test suite
+finally executed real PowerShell for the first time. Treat "no tests reached
+this file beyond a parse check" (`docs/PROJECT_STATUS.md` known issue #12) as
+still true and still worth closing.
+
 ---
 
 ## Verified NOT bugs — recorded so they are not re-raised

@@ -27,6 +27,13 @@
 # See Backup.Functions.Tests.ps1: scripts/ has no StrictMode (R-01).
 Set-StrictMode -Off
 
+# Pester 6 rejects a BeforeEach/AfterEach directly in the file root ("Each
+# test setup is not supported in root") - only BeforeAll/AfterAll are allowed
+# there. Wrapping the whole file in one outer Describe is a no-op for every
+# Describe already nested inside it, and keeps the file running unmodified
+# under Pester 5.
+Describe 'Import-PolicyHistoryToDatabase.ps1 parity' {
+
 BeforeAll {
     . "$PSScriptRoot/TestSupport.ps1"
 
@@ -231,4 +238,6 @@ Describe 'ConvertTo-DateTimeOrMin' {
         $later   = ConvertTo-DateTimeOrMin -Text '2026-07-02T10:00:00.0000000Z'
         $earlier | Should -BeLessThan $later
     }
+}
+
 }

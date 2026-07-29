@@ -81,6 +81,22 @@ Un-skip when the finding is fixed.
 
 ---
 
+## Pester version
+
+This suite runs on Pester 5.x **and** Pester 6.x. That took one structural
+fix: Pester 6 rejects a `BeforeEach`/`AfterEach` written directly at file
+scope ("Each test setup is not supported in root") - a pattern several files
+here used and Pester 5 allowed. Every test file's content is now wrapped in
+one outer `Describe` so file-scope `BeforeEach`/`AfterEach` become
+Describe-scope, which both versions support identically. Root-level
+`BeforeAll`/`AfterAll` were never affected - only the per-test hooks were.
+
+**If you add a new test file**: wrap its whole body (everything after
+`Set-StrictMode -Off`) in one outer `Describe '<script>.ps1 <what>'  { ... }`,
+even if it only has a root `BeforeAll` today. A later `BeforeEach` added
+inside an unwrapped file will pass on whatever Pester version you tested
+with and fail on the other.
+
 ## StrictMode
 
 The suite runs with `Set-StrictMode -Off`, matching production: the five files
