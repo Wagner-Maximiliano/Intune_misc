@@ -810,9 +810,20 @@ function Get-FirstNodeText {
 # <Identifier> is searched with a descendant axis because RSoP puts it
 # directly under <GPO> for a per-setting reference but under <GPO><Path> in
 # the top-level GPO list; <Name> is preferred as a direct child so a nested
-# element cannot shadow it. Returns empty strings (never $null, never
-# throws) when the XML does not carry a GPO reference - older/partial
-# GPResult exports and non-registry policy extensions legitimately omit it.
+# element cannot shadow it.
+#
+# The <GPO> element is looked for in BOTH directions, because the two
+# layouts gpresult produces attribute a setting to its GPO differently:
+# some extensions nest a <GPO> reference inside each setting (descendant),
+# while others emit the settings inside the <GPO> element they came from
+# (ancestor). Searching only downward finds nothing at all in the second
+# layout, which is the difference between a populated GpoId column and an
+# empty one. Descendant wins when both are present: a per-setting reference
+# is more specific than the enclosing block.
+#
+# Returns empty strings (never $null, never throws) when the XML carries no
+# GPO reference in either direction - older/partial GPResult exports and
+# some policy extensions legitimately omit it.
 function Get-GpoIdentity {
     param([Parameter(Mandatory)][System.Xml.XmlNode]$Node)
 
@@ -821,20 +832,27 @@ function Get-GpoIdentity {
         Id   = ''
     }
 
-    $gpoNode = $Node.SelectSingleNode(".//*[local-name()='GPO']")
+    $gpoNodes = @(
+        $Node.SelectSingleNode(".//*[local-name()='GPO']")
+        $Node.SelectSingleNode("ancestor::*[local-name()='GPO'][1]")
+    ) | Where-Object { $_ }
 
-    if ($gpoNode) {
-        $nameNode = $gpoNode.SelectSingleNode("./*[local-name()='Name']")
-        if (-not $nameNode) {
-            $nameNode = $gpoNode.SelectSingleNode(".//*[local-name()='Name']")
-        }
-        if ($nameNode -and -not [string]::IsNullOrWhiteSpace($nameNode.InnerText)) {
-            $identity.Name = $nameNode.InnerText.Trim()
+    foreach ($gpoNode in $gpoNodes) {
+        if ([string]::IsNullOrWhiteSpace($identity.Name)) {
+            $nameNode = $gpoNode.SelectSingleNode("./*[local-name()='Name']")
+            if (-not $nameNode) {
+                $nameNode = $gpoNode.SelectSingleNode(".//*[local-name()='Name']")
+            }
+            if ($nameNode -and -not [string]::IsNullOrWhiteSpace($nameNode.InnerText)) {
+                $identity.Name = $nameNode.InnerText.Trim()
+            }
         }
 
-        $idNode = $gpoNode.SelectSingleNode(".//*[local-name()='Identifier']")
-        if ($idNode -and -not [string]::IsNullOrWhiteSpace($idNode.InnerText)) {
-            $identity.Id = $idNode.InnerText.Trim()
+        if ([string]::IsNullOrWhiteSpace($identity.Id)) {
+            $idNode = $gpoNode.SelectSingleNode(".//*[local-name()='Identifier']")
+            if ($idNode -and -not [string]::IsNullOrWhiteSpace($idNode.InnerText)) {
+                $identity.Id = $idNode.InnerText.Trim()
+            }
         }
     }
 
