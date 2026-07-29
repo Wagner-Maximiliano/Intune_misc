@@ -1643,7 +1643,7 @@ function Convert-ObjectsToHtmlTable {
             }
 
             $labelText = ConvertTo-HtmlEncoded $filterColumn
-            "<label class=""filter-label"">$labelText: <select class=""table-filter"" data-filter-table=""$(ConvertTo-HtmlEncoded $TableId)"" data-filter-col=""$colIndex""><option value="""">All</option>$($optionTags -join '')</select></label>"
+            "<label class=""filter-label"">${labelText}: <select class=""table-filter"" data-filter-table=""$(ConvertTo-HtmlEncoded $TableId)"" data-filter-col=""$colIndex""><option value="""">All</option>$($optionTags -join '')</select></label>"
         }
 
         if ($filterControls) {
@@ -2932,6 +2932,15 @@ try {
         throw "HTML report generation failed. The CSV evidence in '$($folders.Reports)' is still valid. $($_.Exception.Message)"
     }
 
+    # Same "authoritative blocked GPO or confirmed overlap" definition used
+    # by the exit-code contract at the bottom of this script (kept as a
+    # separate calculation here because the manifest is written before that
+    # section runs) - surfaced in the manifest so fleet-wide callers (e.g.
+    # Invoke-MDMWinsOverGPFleet.ps1's FleetSummary.csv) don't have to open
+    # the HTML report to get per-device conflict counts.
+    $manifestConfirmedOverlapCount = @($verifiedRows | Where-Object { $_.GpoConfigured -and $_.MdmConfigured }).Count
+    $manifestConflictsFoundCount = $blockedGpResult.Rows.Count + $manifestConfirmedOverlapCount
+
     $manifest = [ordered]@{
         ComputerName        = $env:COMPUTERNAME
         Generated           = (Get-Date).ToString('o')
@@ -2950,6 +2959,17 @@ try {
         HtmlReport          = $reportPath
         BlockedGroupPoliciesParseStatus = $blockedGpResult.ParseStatus
         BlockedGroupPoliciesCount       = $blockedGpResult.Rows.Count
+        # MDMWinsOverGP / ControlPolicyConflict state, and the counts behind
+        # this run's "Heuristic overlap candidates" / "PolicyManager
+        # effective rows" HTML report sections.
+        MdmWinsOverGpEnabled     = ($conflictState.MDMWinsOverGP -eq '1')
+        MdmWinsOverGpState       = $conflictState.Interpretation
+        PolicyManagerRowCount    = $mdmRows.Count
+        GpoSettingsCount         = $gpoRows.Count
+        VerifiedMappingCount     = $mappings.Count
+        ConfirmedOverlapCount    = $manifestConfirmedOverlapCount
+        HeuristicOverlapCount    = $heuristicRows.Count
+        ConflictsFoundCount      = $manifestConflictsFoundCount
         # Additive-only fields for -ReplayFromPath provenance: existing
         # consumers of Manifest.json that don't know about these simply
         # never see them; IsReplay is $false and ReplaySourceFolder is

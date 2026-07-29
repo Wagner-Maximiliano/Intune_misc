@@ -172,6 +172,29 @@
       TimedOut           - the remote run did not finish within
                            -RemoteTimeoutSeconds.
 
+    Additional per-device columns in the summary CSV, sourced from each
+    device's own Manifest.json (Copy mode only - see the Manifest-read
+    comment near the ManifestJson property below; left blank for
+    RemotePath mode and for devices that never produced a manifest, e.g.
+    Offline/ConnectionFailed/TimedOut):
+      MdmWinsOverGpEnabled  - whether MDMWinsOverGP is enabled in the
+                              effective PolicyManager device store.
+      MdmWinsOverGpState    - the human-readable interpretation of that
+                              ControlPolicyConflict state.
+      PolicyManagerRowCount - number of effective PolicyManager
+                              (device+user) policy rows found.
+      GpoSettingsCount      - number of applied GPO settings found.
+      VerifiedMappingCount  - number of verified GPO-to-CSP mapping rows
+                              supplied for this run.
+      ConfirmedOverlapCount - number of verified mappings where both the
+                              GPO and MDM sides are configured.
+      HeuristicOverlapCount - number of heuristic (unverified) GPO/MDM
+                              overlap candidates found.
+      ConflictsFoundCount   - total conflicts found (authoritative blocked
+                              GPO rows + ConfirmedOverlapCount); the same
+                              count that drives this device's own exit code
+                              2 (ConflictsFound).
+
     This script's own exit code is a fleet-wide rollup: 1 if any device
     failed to run or connect, else 2 if any device reported conflicts or
     degraded evidence, else 0. Always read FleetSummary.csv for the
@@ -424,14 +447,26 @@ else {
 $results = @{}
 foreach ($name in $deviceNames) {
     $results[$name] = [PSCustomObject]@{
-        DeviceName   = $name
-        Online       = $false
-        Outcome      = 'Offline'
-        ExitCode     = $null
-        CollectedZip = ''
-        Detail       = ''
-        StartedAt    = $null
-        FinishedAt   = $null
+        DeviceName            = $name
+        Online                = $false
+        Outcome               = 'Offline'
+        ExitCode              = $null
+        CollectedZip          = ''
+        Detail                = ''
+        StartedAt             = $null
+        FinishedAt            = $null
+        # Populated from each device's Manifest.json when available (Copy
+        # mode only - see the comment above the RemotePath mode's
+        # -ManifestJson handling below). Left blank otherwise, e.g. for
+        # Offline/ConnectionFailed devices or RemotePath mode.
+        MdmWinsOverGpEnabled  = ''
+        MdmWinsOverGpState    = ''
+        PolicyManagerRowCount = ''
+        GpoSettingsCount      = ''
+        VerifiedMappingCount  = ''
+        ConfirmedOverlapCount = ''
+        HeuristicOverlapCount = ''
+        ConflictsFoundCount   = ''
     }
 }
 
@@ -525,11 +560,12 @@ if ($sessions.Count -gt 0) {
         param($Mode, $ScriptFiles, $RemotePathValue, $ResultsShareValue, $ExtraArgs, $KeepTemp)
 
         $result = [PSCustomObject]@{
-            ExitCode    = $null
-            ZipPath     = ''
-            WorkFolder  = ''
-            ErrorDetail = ''
-            OutputTail  = ''
+            ExitCode     = $null
+            ZipPath      = ''
+            WorkFolder   = ''
+            ErrorDetail  = ''
+            OutputTail   = ''
+            ManifestJson = ''
         }
 
         try {
@@ -588,6 +624,25 @@ if ($sessions.Count -gt 0) {
                 $zip = Get-ChildItem -LiteralPath $evidenceRoot -Filter '*.zip' -File -ErrorAction SilentlyContinue |
                     Sort-Object LastWriteTime -Descending | Select-Object -First 1
                 if ($zip) { $result.ZipPath = $zip.FullName }
+
+                # Manifest.json (written by Test-MDMWinsOverGP.ps1 on
+                # success) carries per-device metrics - conflict counts,
+                # MDMWinsOverGP state, PolicyManager row counts, heuristic
+                # overlap counts - that FleetSummary.csv surfaces below.
+                # Read here, over the already-open session, rather than
+                # unzipping the collected evidence back on the management
+                # server.
+                $manifestFile = Get-ChildItem -LiteralPath $evidenceRoot -Filter 'Manifest.json' -File -Recurse -ErrorAction SilentlyContinue |
+                    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                if ($manifestFile) {
+                    try {
+                        $result.ManifestJson = Get-Content -LiteralPath $manifestFile.FullName -Raw -Encoding UTF8 -ErrorAction Stop
+                    }
+                    catch {
+                        # Non-fatal: the ZIP still has the full manifest even
+                        # if this convenience read fails.
+                    }
+                }
 
                 if (Test-Path -LiteralPath $stdoutPath) {
                     $tail = Get-Content -LiteralPath $stdoutPath -Tail 25 -ErrorAction SilentlyContinue
@@ -680,6 +735,30 @@ if ($sessions.Count -gt 0) {
             $row.Outcome = Get-RemoteExitOutcome -ExitCode ([int]$item.ExitCode)
             $row.Detail = "Test-MDMWinsOverGP.ps1 exited with code $($item.ExitCode)."
             if ($item.ErrorDetail) { $row.Detail = "$($row.Detail) $($item.ErrorDetail)" }
+        }
+
+        # ------------------------------------------------------------------
+        # Per-device metrics from Manifest.json (Copy mode only - RemotePath
+        # mode never gives this management server a handle on the device's
+        # local evidence folder, only whatever -ResultsShare the device
+        # wrote to itself). Parsed leniently: a malformed/missing manifest
+        # just leaves these columns blank rather than failing the run.
+        # ------------------------------------------------------------------
+        if ($item.ManifestJson) {
+            try {
+                $manifest = $item.ManifestJson | ConvertFrom-Json -ErrorAction Stop
+                $row.MdmWinsOverGpEnabled  = [bool]$manifest.MdmWinsOverGpEnabled
+                $row.MdmWinsOverGpState    = $manifest.MdmWinsOverGpState
+                $row.PolicyManagerRowCount = $manifest.PolicyManagerRowCount
+                $row.GpoSettingsCount      = $manifest.GpoSettingsCount
+                $row.VerifiedMappingCount  = $manifest.VerifiedMappingCount
+                $row.ConfirmedOverlapCount = $manifest.ConfirmedOverlapCount
+                $row.HeuristicOverlapCount = $manifest.HeuristicOverlapCount
+                $row.ConflictsFoundCount   = $manifest.ConflictsFoundCount
+            }
+            catch {
+                Write-Log -Level WARN -Message "[$computerName] Ran successfully but its Manifest.json could not be parsed for summary metrics: $($_.Exception.Message)"
+            }
         }
 
         # ------------------------------------------------------------------
