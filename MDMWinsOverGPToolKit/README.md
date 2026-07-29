@@ -1,38 +1,52 @@
-I created the PowerShell toolkit:
+# MDMWinsOverGP Validation Toolkit
 
-[Download the MDMWinsOverGP Validation Toolkit](sandbox:/mnt/data/MDMWinsOverGP-Validation-Toolkit.zip)
+When a Windows device is co-managed, MDM policy can silently win over Group
+Policy. The `MDMWinsOverGP` setting (the `ControlPolicyConflict` Policy CSP
+area) tells the Group Policy engine to stand down wherever MDM has configured
+the equivalent policy - so a GPO that still exists, still applies, and still
+looks healthy in GPMC can simply stop taking effect on that device, with
+nothing in GPMC saying so. ([Microsoft Learn][1])
 
-The ZIP contains:
+This toolkit answers the obvious next question: **where is that actually
+happening on this device?** It collects the evidence Windows itself exposes, joins it
+together, and produces an interactive HTML report plus CSVs and a ZIP evidence
+package you can hand to someone else.
 
-* Test-MDMWinsOverGP.ps1
-* PolicyMappings-Sample.csv
-* README.txt
+It is a read-only collector and reporter: it changes no policy and configures
+nothing. The only two options that touch the device at all are `-RunGpUpdate`
+and `-EnableDebugLog`, both opt-in, and the Debug channel can be turned back
+off by the same run (`-DisableDebugLogAfterCollection`).
 
-Run it from an elevated PowerShell session:
+## What is in this folder
+
+| File | What it is |
+|---|---|
+| `Test-MDMWinsOverGP.ps1` | The collector and reporter. Runs on one device and writes a timestamped evidence package. Start here. |
+| `Build-PolicyMappings.ps1` | Auto-generates the GPO-to-CSP mapping CSV from the local ADMX catalog plus live registry evidence, so verified mappings need not be hand-curated. See "Build-PolicyMappings.ps1" below. |
+| `Invoke-MDMWinsOverGPFleet.ps1` | Runs `Test-MDMWinsOverGP.ps1` across many devices from a management server and collects the results centrally. See "Invoke-MDMWinsOverGPFleet.ps1" below. |
+| `PolicyMappings-Sample.csv` | A short worked example of the mapping CSV format accepted by `-MappingCsv`. |
+
+## Requirements
+
+- Windows PowerShell 5.1 or PowerShell 7 (`#requires -Version 5.1`).
+- **Administrator**, for a live collection run: it reads HKLM policy state,
+  exports event logs, and runs `gpresult.exe` and `MdmDiagnosticsTool.exe`.
+  The exception is `-ReplayFromPath`, which regenerates only the
+  analysis/report side from a previous run's evidence and deliberately does
+  **not** require elevation (see "Replaying a previous run" below).
+- Nothing else: no modules to install, no network access, no tenant
+  credentials. Every input is local to the device, and the generated report
+  is fully offline-capable.
+
+## Quick start
+
+From an elevated PowerShell session, in the toolkit folder:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
 
-.\Test-MDMWinsOverGP.ps1 `
-  -EnableDebugLog `
-  -RunGpUpdate `
-  -SinceHours 24
+.\Test-MDMWinsOverGP.ps1 -EnableDebugLog -RunGpUpdate -SinceHours 24
 ```
-
-([Microsoft Learn][1])olicyManager device and user settings.
-
-* ProviderSet and WinningProvider metadata where Windows exposes it.
-* The "Blocked Group Policies" table parsed directly out of `MdmDiagReport.html` - Windows' own authoritative statement of which GPOs it actually blocked because MDM had configured the equivalent policy (see "Blocked Group Policies (authoritative evidence)" below).
-* GPResult in XML, HTML, and text formats.
-* MDM diagnostic reports.
-* DeviceManagement Admin, Operational, and Debug logs.
-* Event 881 records.
-* Traditional policy registry locations.
-* Verified GPO-to-CSP overlaps from a mapping CSV.
-* Heuristic overlap candidates based on policy names.
-* A consolidated HTML report.
-* CSV reports and the original EVTX files.
-* A ZIP evidence package.
 
 The main result is:
 
@@ -40,27 +54,27 @@ The main result is:
 Reports\MDMWinsOverGP-Validation.html
 ```
 
-The report separates results into two important categories.
+inside that run's evidence folder. See "Where data lives" under "Central
+deployment" below for where the evidence folder itself is created.
 
-Verified mapping means you added a documented GPO-to-Policy-CSP relationship to the mapping CSV.
+## A cleaner test sequence
 
-Heuristic candidate means the GPO and MDM setting names appear related. It is only a review candidate. It is not treated as proof of a conflict.
+The DeviceManagement Debug channel only records what happens *after* it is
+enabled, so a first run mostly proves collection works. To capture real policy
+processing:
 
-This distinction matters because Windows does not provide a complete machine-readable mapping between every GPResult setting and every Policy CSP setting. MDMWinsOverGP applies to Policy CSP policies, not every CSP or every Intune setting. Microsoft also documents specific exceptions, including Defender CSP and Windows Hello for Business policies. ([Microsoft Learn][1])([Microsoft Learn][1])or the best test sequence:
-
-1. Run the script with `-EnableDebugLog`.
-2. Trigger an Intune sync.
+1. Run the script once with `-EnableDebugLog` (this enables the channel).
+2. Trigger an Intune sync from Settings or Company Portal.
 3. Run `gpupdate /force`.
 4. Trigger another Intune sync.
-5. Run the script again with a wider period:
+5. Run the script again over a wider window, without clearing the logs:
 
 ```powershell
-.\Test-MDMWinsOverGP.ps1 `
-  -EnableDebugLog `
-  -SinceHours 48
+.\Test-MDMWinsOverGP.ps1 -EnableDebugLog -SinceHours 48
 ```
 
-You can disable the Debug log automatically after collection:
+To have the Debug channel disabled again after collection (only ever done when
+that same run was the one that enabled it):
 
 ```powershell
 .\Test-MDMWinsOverGP.ps1 `
@@ -69,60 +83,114 @@ You can disable the Debug log automatically after collection:
   -RunGpUpdate
 ```
 
-Microsoft supports MDM diagnostic collection through `MdmDiagnosticsTool.exe`, and the DeviceManagement Enterprise Diagnostics Provider Admin and Debug channels are the main local Windows logs for MDM processing. ([Microsoft Learn][2])liberately does not treat Event 881 as proof of a conflict. It records those events as PolicyManager activity and uses them as supporting evidence only.
+Supplying verified mappings by hand:
 
-MDMWinsOverGP Validation Script
-
-Files
-- Test-MDMWinsOverGP.ps1
-- Build-PolicyMappings.ps1
-- PolicyMappings-Sample.csv
-
-Recommended first run
-
-Open Windows PowerShell 5.1 or PowerShell 7 as Administrator:
-
-Set-ExecutionPolicy -Scope Process Bypass
-.\Test-MDMWinsOverGP.ps1 -EnableDebugLog -RunGpUpdate -SinceHours 24
-
-For a cleaner test sequence:
-1. Enable the Debug channel.
-2. Trigger an Intune sync from Settings or Company Portal.
-3. Run gpupdate /force.
-4. Trigger another Intune sync.
-5. Run the script again without clearing the logs.
-
-Example with verified mappings:
-
+```powershell
 .\Test-MDMWinsOverGP.ps1 `
   -EnableDebugLog `
   -MappingCsv .\PolicyMappings-Sample.csv `
   -SinceHours 48
+```
 
-Example that auto-generates the mapping CSV via Build-PolicyMappings.ps1
-instead of supplying one by hand (see "Chaining the two scripts" below):
+Or letting the toolkit generate the mapping CSV itself, filtered to this
+device's own applied GPO settings (see "Chaining the two scripts" below):
 
+```powershell
 .\Test-MDMWinsOverGP.ps1 `
   -EnableDebugLog `
   -GenerateMappings `
   -SinceHours 48
+```
 
-Main outputs (written under `Reports\` inside the timestamped evidence
-folder for this run - see "Where data lives" below for where that folder
-itself is created)
-- Reports\MDMWinsOverGP-Validation.html (interactive, sortable/filterable, dark-mode-capable)
-- Reports\Blocked-GroupPolicies.csv (parsed from MDMDiagReport.html - see "Blocked Group Policies (authoritative evidence)" below)
-- Reports\Verified-Overlap-Results.csv
-- Reports\Heuristic-Overlap-Candidates.csv
-- Reports\MDM-EffectivePolicies.csv
-- Reports\GPO-Settings.csv
-- Reports\Event-881.csv
-- Reports\PolicyMappings-Generated.csv and PolicyMappings-Generated-Filtered.csv (only written when `-GenerateMappings` was passed)
-- Events\*.evtx
-- GPResult\GPResult.html
-- GPResult\GPResult.xml
-- MDMDiagnostics\ (including MdmDiagnosticsTool.exe's own MDMDiagReport.html)
-- A ZIP containing the full evidence package, optionally also copied to `-ResultsShare` (see below)
+## What it collects
+
+- MDMWinsOverGP / `ControlPolicyConflict` state.
+- PolicyManager effective device and user settings.
+- `ProviderSet` and `WinningProvider` metadata, where Windows exposes it.
+- **The "Blocked Group Policies" table, parsed directly out of
+  `MDMDiagReport.html`** - Windows' own authoritative statement of which GPOs
+  it actually blocked because MDM had configured the equivalent policy. This
+  is categorically the strongest evidence the toolkit has; see "Blocked Group
+  Policies (authoritative evidence)" below.
+- GPResult in XML, HTML, and text.
+- MDM diagnostic output from `MdmDiagnosticsTool.exe`.
+- DeviceManagement Enterprise Diagnostics Provider Admin, Operational, and
+  Debug logs, plus the original EVTX files.
+- Event 881 records - recorded as PolicyManager activity and used as
+  supporting evidence only, never as proof of a conflict.
+- Traditional policy registry locations.
+- Verified GPO-to-CSP overlaps from a mapping CSV.
+- Heuristic overlap candidates based on policy-name similarity.
+
+Microsoft supports MDM diagnostic collection through `MdmDiagnosticsTool.exe`,
+and the DeviceManagement Enterprise Diagnostics Provider Admin and Debug
+channels are the main local Windows logs for MDM processing.
+([Microsoft Learn][2])
+
+## What you get out
+
+Every run - live or replayed - creates its own `<ComputerName>-<timestamp>`
+evidence folder containing:
+
+- `Reports\MDMWinsOverGP-Validation.html` - **the main result.** Interactive:
+  sortable/filterable tables, dark mode, entirely inline so it works offline.
+- `Reports\Blocked-GroupPolicies.csv` - the rows parsed from
+  `MDMDiagReport.html`. Whether the table was genuinely empty or simply could
+  not be parsed is stated in the HTML report and `Log.txt`, never inferred
+  from this file being empty (see below).
+- `Reports\Verified-Overlap-Results.csv` and
+  `Reports\Heuristic-Overlap-Candidates.csv` - the two result categories
+  described below, kept separate on purpose.
+- `Reports\GPO-Settings.csv` - every setting GPResult reported as applied on
+  this device. (The join against CSP mappings and MDM evidence is done in the
+  HTML report's "Applied GPO settings and CSP mapping status" section.)
+- `Reports\MDM-EffectivePolicies.csv` and `Reports\MDMWinsOverGP-State.csv`.
+- `Reports\Event-881.csv`, `Reports\DeviceManagement-Events.csv`,
+  `Reports\EventLog-Configuration.csv`.
+- `Reports\PolicyMappings-Template.csv` - a one-row example showing the
+  columns a hand-curated mapping CSV needs.
+- `Reports\PolicyMappings-Generated.csv` and
+  `Reports\PolicyMappings-Generated-Filtered.csv` - only written when
+  `-GenerateMappings` was passed.
+- `GPResult\GPResult.xml`, `GPResult.html`, `GPResult.txt`.
+- `Registry\PolicyManager-AllValues.csv` and
+  `Registry\ClassicPolicyRegistry.csv`.
+- `MDMDiagnostics\` - including `MdmDiagnosticsTool.exe`'s own
+  `MDMDiagReport.html`.
+- `Events\*.evtx`.
+- `Manifest.json` - what this run was and did, including replay provenance.
+- `Log.txt` - a timestamped INFO/WARN/ERROR record of every step. **Start here
+  when troubleshooting.** `Transcript.txt` holds the raw console output.
+- A ZIP of the whole package, optionally copied to `-ResultsShare` (see
+  "Central result collection" below). A run that fails partway through still
+  produces a `-PARTIAL` ZIP alongside a `COLLECTION-INCOMPLETE.txt`.
+
+The process exit code is a documented `0`/`1`/`2`/`3` contract intended for
+Intune Win32 apps, SCCM and RMM tooling - see "Exit codes" below.
+
+## Verified mappings vs heuristic candidates
+
+The report separates its overlap results into two categories, and the
+difference between them is the whole point:
+
+- **Verified mapping** - a documented GPO-to-Policy-CSP relationship was
+  present in the mapping CSV (hand-curated, or generated by
+  `Build-PolicyMappings.ps1`). A row with both a mapping *and* MDM evidence is
+  a confirmed overlap, and is what the Summary's "Verified overlaps" count
+  reflects.
+- **Heuristic candidate** - the GPO and MDM setting names merely appear
+  related. It is a review candidate. It is **not** treated as proof of a
+  conflict.
+
+This distinction matters because Windows does not provide a complete
+machine-readable mapping between every GPResult setting and every Policy CSP
+setting. MDMWinsOverGP applies to Policy CSP policies, not to every CSP or
+every Intune setting, and Microsoft documents specific exceptions including
+Defender CSP and Windows Hello for Business policies. ([Microsoft Learn][1])
+
+How to read each kind of evidence - including why heuristic candidates are
+still shown prominently, and why an empty "Blocked Group Policies" table is
+never presented as an all-clear - is set out under "Interpretation" below.
 
 ## Blocked Group Policies (authoritative evidence)
 

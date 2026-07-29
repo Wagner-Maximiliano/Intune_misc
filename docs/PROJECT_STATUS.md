@@ -4,8 +4,8 @@
 Update it in the same commit as any change. If this file and the code
 disagree, the code is right and this file is a bug.
 
-- **Last updated**: 2026-07-28
-- **Updated by**: session that rewrote the test suite (Issue #14)
+- **Last updated**: 2026-07-29
+- **Updated by**: session that rewrote the MDM toolkit README intro (Issue #16)
 - **Current phase**: Phase 0 — Bootstrap & consolidation (review and tests done,
   module extraction next)
 
@@ -105,7 +105,7 @@ Full documentation: `MDMWinsOverGPToolKit/README.md`.
 | ~~1~~ | ~~Full code review, both toolsets~~ — **done**, see `docs/REVIEW-PHASE0.md` | [#13](https://github.com/Wagner-Maximiliano/Intune_misc/issues/13) | — |
 | 2 | Fix the test suite so it tests production code — **written, see `tests/README.md`; Issue stays open until it has been run** | [#14](https://github.com/Wagner-Maximiliano/Intune_misc/issues/14) | #13 ✅ |
 | 3 | Extract shared `Continuum.*` modules | [#15](https://github.com/Wagner-Maximiliano/Intune_misc/issues/15) | #13 ✅, #14 ✅ |
-| 4 | Fix garbled `MDMWinsOverGPToolKit/README.md` intro | [#16](https://github.com/Wagner-Maximiliano/Intune_misc/issues/16) | — (independent) |
+| ~~4~~ | ~~Fix garbled `MDMWinsOverGPToolKit/README.md` intro~~ — **done** | [#16](https://github.com/Wagner-Maximiliano/Intune_misc/issues/16) | — (independent) |
 
 ---
 
@@ -119,7 +119,7 @@ properly, update the docs, commit.
 
 | Order | Task | Why it's safe to do now |
 |---|---|---|
-| **A** | **Fix the garbled `MDMWinsOverGPToolKit/README.md` intro** ([#16](https://github.com/Wagner-Maximiliano/Intune_misc/issues/16)) | Documentation only, zero code risk. Constraint: fix **only** the damaged intro (~first 120 lines); the rest of that file is accurate and must not be rewritten. |
+| ~~**A**~~ | ~~**Fix the garbled `MDMWinsOverGPToolKit/README.md` intro**~~ ([#16](https://github.com/Wagner-Maximiliano/Intune_misc/issues/16)) — **done**, see "Recently shipped" | Documentation only, zero code risk. Was constrained to the damaged intro alone; everything from "Blocked Group Policies" onward is unchanged. |
 | **B** | **Extend the test suite to `MDMWinsOverGPToolKit/`** (known issue #12) | Purely additive — new test files cannot break production code. The toolkit's ~5,200 lines currently have **no tests at all**, while `scripts/` now has real coverage. Start with the pure functions (`Get-TokenSet`, `Get-JaccardScore`, `Normalize-PolicyName`, `Convert-ValueToText`) which need no device access, then the ADMX/HTML parsers against fixture files. |
 | **C** | **Deletion detection** (new capability — see `PRODUCT-VISION.md` §6) | Net-new code path; nothing existing changes behaviour. Compare each run's policy set against the manifest's known set and report anything that vanished. **Report only — never auto-delete or auto-restore.** This is the product's core anxiety ("Intune has no recovery for deleted policies") and nothing currently says *"this existed last run and doesn't now."* Add a `-Skip`ped test per D-013 if any part needs a decision. |
 | **D** | **Capture `roleScopeTagIds` and `templateReference` in snapshots** | Two real Graph fields the backup silently drops. Additive to the snapshot shape. **Time-sensitive:** history captured before this lands can never be backfilled, so earlier is strictly better. |
@@ -262,11 +262,9 @@ already fixed — is in **`docs/REVIEW-PHASE0.md`**, indexed R-01…R-12.
    if any test file ever redefines a production function name again. Full
    rationale in `tests/README.md`. **Caveat: the suite has never been run**
    (see "Needs verification" above).
-2. **`MDMWinsOverGPToolKit/README.md` has a garbled intro section** (roughly
-   its first ~120 lines) — artifacts of an old bad edit, with fragments like
-   `([Microsoft Learn][1])olicyManager device and user settings.` Deliberately
-   left alone through many sessions to avoid scope creep. Worth fixing during
-   Phase 0.
+2. ~~**`MDMWinsOverGPToolKit/README.md` has a garbled intro section.**~~
+   **Fixed** (Issue #16) — the first 126 lines were replaced; the rest of the
+   file is untouched. See "Recently shipped".
 3. **Tier A mapping matches are persistently ~0** in `Build-PolicyMappings.ps1`.
    Diagnosed as likely structural, not a bug: when MDM wins, the GPO registry
    write is suppressed, so "both configured" is self-contradictory for a real
@@ -334,6 +332,22 @@ already fixed — is in **`docs/REVIEW-PHASE0.md`**, indexed R-01…R-12.
 
 ## Recently shipped
 
+- **`MDMWinsOverGPToolKit/README.md`'s intro rewritten** (Issue #16, item A,
+  D-015). The first 126 lines were chat-export debris: a `sandbox:` download
+  link for a ZIP that does not exist, a file list naming a `README.txt` this
+  repo does not have, three sentences truncated mid-word by a bad edit
+  (`([Microsoft Learn][1])olicyManager device and user settings.`), and a
+  verbatim paste of the old `README.txt` duplicating the quick start. Replaced
+  with a written intro — what MDMWinsOverGP is and why it matters, the four
+  files in the folder, requirements, quick start, the recommended test
+  sequence, what is collected, what a run produces, and verified-vs-heuristic.
+  **Everything from "Blocked Group Policies (authoritative evidence)" (old line
+  127) onward is byte-for-byte identical** — verified by diffing the tail
+  against the pre-edit file. Every factual claim in the new text was checked
+  against `Test-MDMWinsOverGP.ps1` itself (parameter behaviour, output file
+  names, evidence-folder layout, exit codes), not carried over on trust; two
+  claims were corrected during that check. Documentation only — no code
+  changed, so nothing here needs a test or a hardware run.
 - **Phase 0.2 — the test suite now tests production code** (Issue #14, D-012).
   `tests/TestHelpers.ps1` deleted along with its 21 copies of production
   functions; ~1,200 lines of new tests reach the shipped code through an AST

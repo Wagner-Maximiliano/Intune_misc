@@ -56,7 +56,13 @@ Scope is **both toolsets in full** — see D-008.
       toolkit's mechanism into Core and migrate 61 call sites", and it
       **blocks Phase 1/3 progress reporting** because `Write-Host` output
       cannot be captured by a web UI..
-- [ ] Fix the garbled intro in `MDMWinsOverGPToolKit/README.md` (Known issue #2)
+- [x] Fix the garbled intro in `MDMWinsOverGPToolKit/README.md` (Known issue #2,
+      Issue #16) — the first 126 lines (chat-export artifacts, three sentences
+      truncated mid-word, and a pasted duplicate of the old `README.txt`) were
+      replaced with a written intro: what MDMWinsOverGP is, the four files,
+      requirements, quick start, test sequence, what is collected, what is
+      produced, and verified-vs-heuristic. Everything from "Blocked Group
+      Policies (authoritative evidence)" onward is byte-for-byte unchanged.
 
 ### Additive work that needs no user input and no test run
 

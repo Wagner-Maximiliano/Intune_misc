@@ -383,3 +383,51 @@ automation already sees, not correctness of the contract in isolation.
 a healthy fleet), raise it with the user again — don't fix it unilaterally.
 This decision covers the exit-code *contract*; it does not forbid fixing
 unrelated bugs elsewhere in the same file.
+
+---
+
+## D-015 — The MDM toolkit README is repo-first; its intro drops the ZIP-distribution framing
+
+- **Date**: 2026-07-29
+- **Status**: Decided (by the Issue #16 session)
+
+**Decision.** The rewritten intro of `MDMWinsOverGPToolKit/README.md`
+documents the toolkit **as a folder in this repository**. The old intro's
+distribution framing is gone and should not come back: no
+`sandbox:/mnt/data/...zip` download link, no "the ZIP contains..." file list,
+and no `README.txt` (that file does not exist here — this `README.md` is it).
+The file list is now the four files actually on disk, including
+`Invoke-MDMWinsOverGPFleet.ps1`, which the old intro predated and never
+mentioned.
+
+**Why.** The damage was chat-export debris, and the framing around it was
+equally stale — it described a hand-packaged ZIP delivered in a conversation,
+not the repo that a reader is looking at. Restoring the "original" wording
+would have documented a distribution channel that does not exist.
+
+Two supporting choices, both deliberate:
+
+- **Scope was the damage plus its immediate surroundings, not the file.** Old
+  lines 1–126 were replaced; everything from "Blocked Group Policies
+  (authoritative evidence)" onward is byte-for-byte unchanged and was verified
+  by diff. That section onward is accurate, dense, and hard-won.
+- **Every factual claim was re-derived from `Test-MDMWinsOverGP.ps1`**, not
+  copied forward from the old intro. That check caught two things the old text
+  would have had us repeat: `Blocked-GroupPolicies.csv` carries no
+  `ParseStatus` column (the status is reported in the HTML report and
+  `Log.txt`), and `GPO-Settings.csv` is the raw applied-GPO list — the join
+  against CSP mappings happens in the HTML report, not in that CSV.
+
+**Rejected.**
+- *Reconstruct the original wording from the truncated fragments* — would have
+  preserved authorial voice, but the fragments are cut mid-word and their
+  sources are Microsoft Learn pages the sandbox cannot fetch (403), so the
+  reconstruction would have been invention presented as recovery.
+- *Rewrite the whole README while in there* — tempting given the plain-text
+  "Interpretation"/"Files" headings further down, but `docs/PROJECT_STATUS.md`
+  scoped this task to the damaged intro precisely because the rest is correct
+  and expensive to re-verify. Untouched means diffable.
+- *Delete the `?utm_source=chatgpt.com` query strings on the `[1]`/`[2]` link
+  definitions* — they are cosmetic debris from the same export, but they sit
+  further down the file, outside the damaged region, and the links resolve.
+  Left alone rather than widening the diff.
