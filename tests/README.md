@@ -48,6 +48,7 @@ under `tests/` defines a function name that also exists in `scripts/` or
 | `Restore.Script.Tests.ps1` | `Restore-IntunePolicy.ps1` end to end, asserting on the exact POST body |
 | `ImportDatabase.Functions.Tests.ps1` | `Import-PolicyHistoryToDatabase.ps1`, plus drift detection against the backup script's copies |
 | `ExportSummary.Functions.Tests.ps1` | `Export-PolicySummary.ps1`, plus drift detection on assignment rendering |
+| `Toolkit.PureFunctions.Tests.ps1` | `MDMWinsOverGPToolKit/`'s pure helper functions (`Normalize-PolicyName`, `Get-TokenSet`, `Get-JaccardScore`, `Convert-ValueToText`), plus parity checks between the two files that each keep their own copy |
 | `SuiteIntegrity.Tests.ps1` | Guards on the suite itself, and a parse check over every `.ps1` in the repo |
 
 ---
@@ -99,16 +100,26 @@ with and fail on the other.
 
 ## StrictMode
 
-The suite runs with `Set-StrictMode -Off`, matching production: the five files
-in `scripts/` set no StrictMode at all (`docs/REVIEW-PHASE0.md` R-01). A
-harness stricter than the code it tests can only report failures that cannot
-happen in the field — which is exactly what the old `TestHelpers.ps1` did, as
-the only file in the repo carrying `-Version Latest`.
+Each test file matches the StrictMode of the production code it exercises —
+not one blanket setting for the whole suite:
+
+- Files testing `scripts/` run `Set-StrictMode -Off`, because the five files
+  in `scripts/` set no StrictMode at all (`docs/REVIEW-PHASE0.md` R-01).
+- `Toolkit.PureFunctions.Tests.ps1` (and any future `Toolkit.*.Tests.ps1`
+  file) runs `Set-StrictMode -Version 2.0`, because all three
+  `MDMWinsOverGPToolKit/` scripts set exactly that.
+
+A harness looser or stricter than the code it tests can only report failures
+that cannot happen in the field — which is exactly what the old
+`TestHelpers.ps1` did, as the only file in the repo carrying `-Version
+Latest`, and what a `-Off` toolkit test file would do in the other direction
+by missing the `.Count`-on-`$null` class this project has shipped four times.
 
 When R-11 adopts `Set-StrictMode -Version 2.0` in `scripts/`, change the line
-at the top of each test file to match and re-run: this suite is then the
-instrument that verifies the switch. `SuiteIntegrity.Tests.ps1` has a test
-guarding this, with the same note.
+at the top of each `scripts/`-testing file to match and re-run: every file in
+the suite then agrees, and the suite becomes the instrument that verifies the
+switch. `SuiteIntegrity.Tests.ps1` has a test guarding this, with the same
+note.
 
 ---
 
@@ -121,7 +132,12 @@ still verified only by real runs. Tracked in `docs/PROJECT_STATUS.md`.
   `Set-CellColor` — need `ImportExcel`. The end-to-end tests pass `-SkipExcel`.
 - `Invoke-Db`, `Get-LastInsertRowId`, `Initialize-Schema` and the ingest loop
   in `Import-PolicyHistoryToDatabase.ps1` — need `PSSQLite`.
-- Everything in `MDMWinsOverGPToolKit/` — it collects evidence from a live
-  Windows device. Only the parse check reaches it.
+- Most of `MDMWinsOverGPToolKit/` — it collects evidence from a live Windows
+  device (registry reads, `gpresult.exe`, live `MDMDiagReport.html`).
+  `Toolkit.PureFunctions.Tests.ps1` now covers the device-independent helpers
+  (`Normalize-PolicyName`, `Get-TokenSet`, `Get-JaccardScore`,
+  `Convert-ValueToText`); the ADMX/ADML parsers and the registry/HTML
+  evidence collectors are still untested — see `docs/PROJECT_STATUS.md` item B
+  for the planned next step (fixture-based tests for the parsers).
 
 [Issue #14]: https://github.com/Wagner-Maximiliano/Intune_misc/issues/14

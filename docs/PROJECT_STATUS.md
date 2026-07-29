@@ -5,8 +5,10 @@ Update it in the same commit as any change. If this file and the code
 disagree, the code is right and this file is a bug.
 
 - **Last updated**: 2026-07-29
-- **Updated by**: two sessions today — one rewrote the MDM toolkit README intro
-  (Issue #16), the other fixed the two bugs the suite's first real run found
+- **Updated by**: three sessions today — one rewrote the MDM toolkit README
+  intro (Issue #16), one fixed the two bugs the suite's first real run found,
+  the third added the first tests for `MDMWinsOverGPToolKit/` (item B, pure
+  functions only)
 - **Current phase**: Phase 0 — Bootstrap & consolidation (review and tests done,
   module extraction next)
 
@@ -121,7 +123,7 @@ properly, update the docs, commit.
 | Order | Task | Why it's safe to do now |
 |---|---|---|
 | ~~**A**~~ | ~~**Fix the garbled `MDMWinsOverGPToolKit/README.md` intro**~~ ([#16](https://github.com/Wagner-Maximiliano/Intune_misc/issues/16)) — **done**, see "Recently shipped" | Documentation only, zero code risk. Was constrained to the damaged intro alone; everything from "Blocked Group Policies" onward is unchanged. |
-| **B** | **Extend the test suite to `MDMWinsOverGPToolKit/`** (known issue #12) | Purely additive — new test files cannot break production code. The toolkit's ~5,200 lines currently have **no tests at all**, while `scripts/` now has real coverage. Start with the pure functions (`Get-TokenSet`, `Get-JaccardScore`, `Normalize-PolicyName`, `Convert-ValueToText`) which need no device access, then the ADMX/HTML parsers against fixture files. |
+| **B** | **Extend the test suite to `MDMWinsOverGPToolKit/`** (known issue #12) — **pure-functions half done**, see "Recently shipped"; ADMX/HTML parsers against fixture files still to do | Purely additive — new test files cannot break production code. |
 | **C** | **Deletion detection** (new capability — see `PRODUCT-VISION.md` §6) | Net-new code path; nothing existing changes behaviour. Compare each run's policy set against the manifest's known set and report anything that vanished. **Report only — never auto-delete or auto-restore.** This is the product's core anxiety ("Intune has no recovery for deleted policies") and nothing currently says *"this existed last run and doesn't now."* Add a `-Skip`ped test per D-013 if any part needs a decision. |
 | **D** | **Capture `roleScopeTagIds` and `templateReference` in snapshots** | Two real Graph fields the backup silently drops. Additive to the snapshot shape. **Time-sensitive:** history captured before this lands can never be backfilled, so earlier is strictly better. |
 | **E** | **Warn when a snapshot contains secret-typed settings** | Graph never returns secret values on read, so a restored policy's password/certificate field is silently blank. Scan for `@odata.type` containing `Secret` and **warn, don't block**. Small, additive, and a trust requirement for restore. |
@@ -244,6 +246,13 @@ Two tests are `-Skip`ped **on purpose** and would fail if run: they assert the
 fixed behaviour for open findings R-08 and R-15. That is by design, not
 breakage — see `tests/README.md`.
 
+**New since this run: `tests/Toolkit.PureFunctions.Tests.ps1`**, added after
+the first real run above and not yet exercised by any real run at all. It
+needs the same `Invoke-Pester ./tests` command — no separate step — but is
+called out here because it is the first file running under
+`Set-StrictMode -Version 2.0` rather than `-Off` (see "Recently shipped"), so
+a StrictMode-specific failure here would be new territory for this suite.
+
 ### 2. Outstanding tenant checks — from the review (commit `8ab55c1`) and this one
 
 | What to test | Expected result | Covers |
@@ -340,8 +349,13 @@ already fixed — is in **`docs/REVIEW-PHASE0.md`**, indexed R-01…R-16.
     `Export-IndexWorkbook`, `Get-WorkbookPath` and `Set-CellColor` need
     `ImportExcel`; `Invoke-Db`, `Initialize-Schema` and the ingest loop need
     `PSSQLite`. The suite deliberately depends on neither, so these are still
-    verified only by real runs. `MDMWinsOverGPToolKit/` has no tests at all
-    beyond a parse check — it collects evidence from a live Windows device.
+    verified only by real runs. **`MDMWinsOverGPToolKit/`'s device-independent
+    helpers now have tests** (`tests/Toolkit.PureFunctions.Tests.ps1` —
+    `Normalize-PolicyName`, `Get-TokenSet`, `Get-JaccardScore`,
+    `Convert-ValueToText`, in both files that keep a copy); everything else in
+    the toolkit — the ADMX/ADML parsers, and anything touching a live device
+    (registry reads, `gpresult.exe`, `MDMDiagReport.html`) — still has no
+    coverage beyond the parse check.
 13. **Smaller open items**: lexicographic sheet sort picks the wrong "previous"
     version after >9 runs in one day (R-08); the restore path's defensive
     guards become unreachable once StrictMode lands (R-09); audit-lookup
@@ -362,6 +376,27 @@ already fixed — is in **`docs/REVIEW-PHASE0.md`**, indexed R-01…R-16.
 
 ## Recently shipped
 
+- **First tests for `MDMWinsOverGPToolKit/`** (item B, known issue #12,
+  pure-functions half only). New file `tests/Toolkit.PureFunctions.Tests.ps1`
+  covers `Normalize-PolicyName`, `Get-TokenSet`, `Get-JaccardScore` and
+  `Convert-ValueToText` — the toolkit's only functions that need no live
+  device. Both `Build-PolicyMappings.ps1` and `Test-MDMWinsOverGP.ps1`
+  deliberately keep their own copy of each (each file's own comments say this
+  is so the script stays runnable standalone, unlike the scripts/ copies
+  Issue #14 collapsed), so this file tests **both** copies plus parity checks
+  between them — the same shape `ImportDatabase.Functions.Tests.ps1` already
+  uses for `ConvertTo-FlatSettings`/`Get-PolicyContentHash`.
+  **Runs under `Set-StrictMode -Version 2.0`, not `-Off`** — the first test
+  file in the suite to do so — because that is what all three
+  `MDMWinsOverGPToolKit/` scripts actually set (unlike `scripts/`, R-01);
+  `SuiteIntegrity.Tests.ps1`'s StrictMode guard was updated (previously a
+  blanket "no test file may set any StrictMode version") to require exactly
+  `-Version 2.0` in any `Toolkit.*.Tests.ps1` file and exactly none elsewhere,
+  rather than weakened or bypassed. **Not yet done**: the ADMX/ADML parsers
+  and everything needing a live device (registry reads, `gpresult.exe`,
+  `MDMDiagReport.html`) still have no coverage beyond the parse check — see
+  known issue #12. **Desk-checked only, not executed** — see "Needs
+  verification" below.
 - **First real Pester run, and two harness bugs it found, both fixed**
   (2026-07-29). The user's own Pester install resolved to 6.0.1, which
   rejects a `BeforeEach`/`AfterEach` written directly at file scope — 5 of the

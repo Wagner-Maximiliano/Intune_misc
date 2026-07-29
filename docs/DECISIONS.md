@@ -431,3 +431,63 @@ Two supporting choices, both deliberate:
   definitions* — they are cosmetic debris from the same export, but they sit
   further down the file, outside the damaged region, and the links resolve.
   Left alone rather than widening the diff.
+
+---
+
+## D-016 — Toolkit tests run under `Set-StrictMode -Version 2.0` and cover both duplicate copies
+
+- **Date**: 2026-07-29
+- **Status**: Decided (by the item-B session)
+
+**Decision.** `tests/Toolkit.PureFunctions.Tests.ps1`, the first test file for
+`MDMWinsOverGPToolKit/`, runs `Set-StrictMode -Version 2.0` at the top instead
+of the `-Off` every `scripts/`-testing file uses. `SuiteIntegrity.Tests.ps1`'s
+StrictMode guard changed from "no test file may set any StrictMode version"
+to "files named `Toolkit.*` must set exactly `-Version 2.0`; every other file
+must set none" — it now enforces a per-file match to the strictness of the
+production code that file exercises, rather than one blanket rule for the
+whole suite.
+
+The file also tests **both** independent copies of `Normalize-PolicyName`,
+`Get-TokenSet`, `Get-JaccardScore` and `Convert-ValueToText` — one in
+`Build-PolicyMappings.ps1`, one in `Test-MDMWinsOverGP.ps1` — plus parity
+checks between them, using the same dot-source-inside-`& { }` technique
+`ImportDatabase.Functions.Tests.ps1` already uses for
+`ConvertTo-FlatSettings`/`Get-PolicyContentHash`.
+
+**Why.** `docs/AGENT_ONBOARDING.md`'s StrictMode table is explicit that all
+three `MDMWinsOverGPToolKit/` scripts set `Set-StrictMode -Version 2.0`,
+unlike the five files in `scripts/`, which set none (R-01). D-012's whole
+rationale for matching harness strictness to production strictness is
+symmetric: a harness *looser* than production (running toolkit code under
+`-Off`) can hide exactly the `.Count`-on-`$null` class this project has
+shipped four times, the same way a harness *stricter* than production hid
+nothing useful and cost `TestHelpers.ps1` its credibility. The old blanket
+guard assumed one strictness level for the entire suite because, until this
+file, every test file happened to test `scripts/`; it needed to become
+per-file the moment a second production strictness level entered the suite.
+
+Testing both copies (rather than picking one "canonical" one) follows
+directly from why the toolkit's own comments say each is "kept local ... so
+this script is meant to be runnable standalone" — that is a deliberate
+design choice, not an oversight Issue #14 should have collapsed, so a test
+suite that only covered one copy would leave the other unverified and free to
+drift silently, exactly the failure mode D-012 exists to prevent.
+
+**Rejected.**
+- *Test only one copy (say, `Build-PolicyMappings.ps1`'s) and assume the
+  other matches* — less code, but the two files are diffed as identical only
+  in comments/whitespace today (verified by diff during this session); a
+  future edit to either file with no test on the other would ship a silent
+  divergence, the same class of bug Issue #14 fixed for `scripts/`.
+- *Keep the suite-wide `-Off` and skip StrictMode-dependent assertions in
+  toolkit tests* — avoids touching the guard, but a harness that cannot even
+  express `-Version 2.0` can never verify the toolkit's own
+  `.Count`-on-`$null` defenses (e.g. `Get-JaccardScore`'s `-not $Left`
+  guard), which is exactly the property worth testing given this project's
+  bug history.
+- *Weaken the guard to "no `-Version Latest`" instead of a per-file exact
+  match* — simpler, but re-opens the door to a `-Version 1.0` or `-Version 3`
+  file quietly testing under the wrong rules with nothing to catch it; the
+  whole point of D-012's StrictMode guard is that it is mechanical, not
+  reviewer-dependent.

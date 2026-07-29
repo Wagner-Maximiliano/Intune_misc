@@ -76,9 +76,13 @@ R-15 decisions are outstanding — all of it is new code paths or new tests,
 not changes to working behaviour. `docs/PROJECT_STATUS.md` carries the ordered
 list (items A–E) and the reasoning; keep the two in step.
 
-- [ ] Extend the test suite to `MDMWinsOverGPToolKit/` — its ~5,200 lines have
-      **no tests at all** today, while `scripts/` now has real coverage
-      (Known issue #12). Pure functions first, then parsers against fixtures.
+- [x] Extend the test suite to `MDMWinsOverGPToolKit/`, pure functions —
+      `tests/Toolkit.PureFunctions.Tests.ps1` covers `Normalize-PolicyName`,
+      `Get-TokenSet`, `Get-JaccardScore`, `Convert-ValueToText`, in both files
+      that keep a copy, plus parity checks between them.
+- [ ] Extend the test suite to `MDMWinsOverGPToolKit/`, ADMX/HTML parsers —
+      still **no tests** for these or for anything touching a live device
+      (Known issue #12).
 - [ ] **Deletion detection** — report policies that existed in the previous
       run and no longer do. Report-only, never auto-act. The product's stated
       core anxiety, and currently nothing implements it.
@@ -92,9 +96,11 @@ suite fails if production code breaks, and both toolsets share one logging
 and configuration mechanism.
 
 *Progress against that: "the suite fails if production code breaks" is done for
-`scripts/` as far as an offline suite can go — the Excel and SQLite paths, and
-all of `MDMWinsOverGPToolKit/`, are still uncovered (`docs/PROJECT_STATUS.md`
-known issue #12). "Importable" is what Issue #15 delivers.*
+`scripts/` as far as an offline suite can go, and now covers
+`MDMWinsOverGPToolKit/`'s pure functions too — the Excel and SQLite paths, the
+toolkit's ADMX/HTML parsers, and anything touching a live device are still
+uncovered (`docs/PROJECT_STATUS.md` known issue #12). "Importable" is what
+Issue #15 delivers.*
 
 ---
 

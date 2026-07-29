@@ -77,27 +77,42 @@ Describe 'No test file reimplements production code' {
 
 Describe 'The harness does not run production code under stricter rules than production' {
 
-    It 'sets no StrictMode version anywhere under tests/' {
+    It 'sets no StrictMode version in files testing scripts/, and only -Version 2.0 in files testing the toolkit' {
         # TestHelpers.ps1 was the only file in the repo carrying
         # Set-StrictMode -Version Latest, so its private copies ran under
         # stricter rules than the code they shadowed - a difference that could
         # only ever produce failures impossible in the field, or hide real ones.
-        # The five files in scripts/ set no StrictMode at all (R-01), so the
-        # suite must not either.
+        # The five files in scripts/ set no StrictMode at all (R-01), so any
+        # test file for scripts/ must not set one either.
         #
-        # WHEN R-11 LANDS and scripts/ adopts Set-StrictMode -Version 2.0,
-        # change this test to require exactly that version in the test files,
-        # and change the Set-StrictMode -Off line at the top of each of them to
-        # match. At that point this suite becomes the instrument that verifies
-        # the switch instead of a guard against it.
+        # MDMWinsOverGPToolKit/'s three scripts DO set Set-StrictMode -Version
+        # 2.0 (docs/AGENT_ONBOARDING.md's StrictMode table), so a test file
+        # exercising toolkit code must match that exactly, by the same logic in
+        # the other direction: a harness looser than production would miss the
+        # .Count-on-$null class this project has shipped four times. Test
+        # files are told apart by a 'Toolkit' prefix on the filename - see
+        # tests/Toolkit.PureFunctions.Tests.ps1.
+        #
+        # WHEN R-11 LANDS and scripts/ adopts Set-StrictMode -Version 2.0, every
+        # test file converges on the toolkit rule above and this test collapses
+        # to one branch. At that point this suite becomes the instrument that
+        # verifies the switch instead of a guard against it.
         $offenders = @()
         foreach ($file in @(Get-ChildItem -LiteralPath $script:TestsDir -Filter '*.ps1' -File -Recurse)) {
             $text = Get-Content -LiteralPath $file.FullName -Raw
-            if ($text -match '(?m)^\s*Set-StrictMode\s+-Version') {
-                $offenders += $file.Name
+            $setsVersion2 = $text -match '(?m)^\s*Set-StrictMode\s+-Version\s+2\.0\s*$'
+            $setsOtherVersion = ($text -match '(?m)^\s*Set-StrictMode\s+-Version') -and -not $setsVersion2
+
+            if ($file.Name -like 'Toolkit.*') {
+                if (-not $setsVersion2) {
+                    $offenders += "$($file.Name) tests MDMWinsOverGPToolKit/ (Set-StrictMode -Version 2.0) but does not set that exact mode"
+                }
+            }
+            elseif ($setsVersion2 -or $setsOtherVersion) {
+                $offenders += "$($file.Name) sets a StrictMode version but tests scripts/, which sets none (R-01)"
             }
         }
-        $offenders -join ', ' | Should -BeNullOrEmpty
+        $offenders -join ' ;; ' | Should -BeNullOrEmpty
     }
 }
 

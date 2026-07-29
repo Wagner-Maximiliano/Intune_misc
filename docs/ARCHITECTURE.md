@@ -21,7 +21,8 @@ Intune_misc/
 │   ├── Restore-IntunePolicy.ps1
 │   ├── Get-IntuneSettingsCatalogSnapshot.ps1
 │   └── Export-PolicySummary.ps1
-├── tests/                        Pester, offline. Runs the real scripts/ code (D-012)
+├── tests/                        Pester, offline. Runs the real scripts/ and
+│                                 MDMWinsOverGPToolKit/ code (D-012, D-016)
 ├── MDMWinsOverGPToolKit/         MDM-vs-GPO validation toolset
 │   ├── Test-MDMWinsOverGP.ps1             Single-device collection + HTML report
 │   ├── Build-PolicyMappings.ps1           ADMX/registry → GPO↔CSP mapping CSV
@@ -68,6 +69,13 @@ These were hard-won and should survive the refactor:
 no `PSSQLite`. Because every script in `scripts/` is a monolith (parameters,
 functions, then a main body that connects to Graph), tests reach it two ways,
 both defined in `tests/TestSupport.ps1` and settled in D-012:
+
+`MDMWinsOverGPToolKit/`'s pure functions are reached the same way via
+`Import-ProductionFunction`, just against `Get-ToolkitScriptPath` instead of
+`Get-ProductionScriptPath` — see `tests/Toolkit.PureFunctions.Tests.ps1`
+(D-016). It runs under `Set-StrictMode -Version 2.0`, not the `-Off` the
+`scripts/`-testing files use, because that is what the toolkit's own scripts
+set; `SuiteIntegrity.Tests.ps1` enforces the match per file.
 
 ```
 tests/*.Tests.ps1

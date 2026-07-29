@@ -61,6 +61,19 @@ function Get-ProductionScriptPath {
     return $path
 }
 
+function Get-ToolkitScriptPath {
+    <# Absolute path to a script in MDMWinsOverGPToolKit/, throwing if it has moved. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Name)
+
+    $repoRoot = Split-Path -Parent $PSScriptRoot
+    $path     = Join-Path (Join-Path $repoRoot 'MDMWinsOverGPToolKit') $Name
+    if (-not (Test-Path -LiteralPath $path)) {
+        throw "Toolkit script not found: '$path'. Has it been renamed or moved out of MDMWinsOverGPToolKit/?"
+    }
+    return $path
+}
+
 function Get-ScriptFunctionDefinition {
     <#
         FunctionDefinitionAst nodes in a .ps1 file.
