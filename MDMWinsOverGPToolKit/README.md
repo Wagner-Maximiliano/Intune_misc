@@ -490,7 +490,13 @@ It does not collect or analyze anything itself. It only:
    remote script's own exit code (see "Exit codes" above), where its ZIP was
    collected to, and a plain-English `Outcome` (`Success`, `ConflictsFound`,
    `DegradedEvidence`, `RemoteScriptFailed`, `Offline`, `ConnectionFailed`,
-   `TimedOut`).
+   `TimedOut`). In `Copy` mode (the default), each device's `Manifest.json` is
+   also read back to add per-device metrics: `MdmWinsOverGpEnabled`,
+   `MdmWinsOverGpState`, `PolicyManagerRowCount`, `GpoSettingsCount`,
+   `VerifiedMappingCount`, `ConfirmedOverlapCount`, `HeuristicOverlapCount`,
+   and `ConflictsFoundCount`. These are blank for `RemotePath` mode and for
+   devices that never produced a manifest (e.g. `Offline`,
+   `ConnectionFailed`, `TimedOut`).
 
 ```powershell
 # Run as an already-elevated domain admin account - the current session's
