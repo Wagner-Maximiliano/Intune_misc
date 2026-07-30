@@ -106,7 +106,7 @@ Full documentation: `MDMWinsOverGPToolKit/README.md`.
 | # | Task | Issue | Depends on |
 |---|---|---|---|
 | ~~1~~ | ~~Full code review, both toolsets~~ — **done**, see `docs/REVIEW-PHASE0.md` | [#13](https://github.com/Wagner-Maximiliano/Intune_misc/issues/13) | — |
-| 2 | Fix the test suite so it tests production code — **written, see `tests/README.md`; Issue stays open until it has been run** | [#14](https://github.com/Wagner-Maximiliano/Intune_misc/issues/14) | #13 ✅ |
+| 2 | Fix the test suite so it tests production code — **written and confirmed green (135/0/2 skipped); one deliberate-break round-trip left before the Issue closes** | [#14](https://github.com/Wagner-Maximiliano/Intune_misc/issues/14) | #13 ✅ |
 | 3 | Extract shared `Continuum.*` modules | [#15](https://github.com/Wagner-Maximiliano/Intune_misc/issues/15) | #13 ✅, #14 ✅ |
 | ~~4~~ | ~~Fix garbled `MDMWinsOverGPToolKit/README.md` intro~~ — **done** | [#16](https://github.com/Wagner-Maximiliano/Intune_misc/issues/16) | — (independent) |
 
@@ -151,16 +151,16 @@ Wait for the user's Pester run. Do items A–E instead.
 
 ---
 
-### Closing #14 — needs the user, two steps
+### Closing #14 — one step left, needs the user
 
-#14's code is written and committed, but its last acceptance criterion — "a
-deliberate break in a production script causes a test failure" — needs a
-PowerShell interpreter:
-
-1. `Invoke-Pester ./tests` and fix whatever the first real run turns up.
-2. Mutate something in `scripts/` on purpose (change a `.Trim()` in
-   `Get-SafeFileName`, or drop the `Where-Object { $_ }` at
-   `Backup-IntunePolicies.ps1:671`) and confirm the suite goes red, then revert.
+The suite is **green** (135 passed, 0 failed, 2 skipped, confirmed
+2026-07-30). Its last acceptance criterion — "a deliberate break in a
+production script causes a test failure" — still needs a PowerShell
+interpreter: mutate something in `scripts/` on purpose (e.g. drop the
+`Where-Object { $_ }` at `Backup-IntunePolicies.ps1:692`), confirm
+`Invoke-Pester ./tests` goes red, then revert and confirm green again. See
+"Needs verification on real hardware" above for the exact steps. Once that
+round-trips, close #14.
 
 ---
 
@@ -180,7 +180,8 @@ When #15 does become unblocked, two things are already scaffolded for it:
 
 **Three things are waiting on the user.** None of them block items A–E above:
 
-1. **The Pester run** that closes #14 (two steps, just above).
+1. **The deliberate-break round-trip** that closes #14 (just above) — the
+   suite itself is already green.
 2. **R-11** — when to adopt `Set-StrictMode` in `scripts/`.
 3. **R-15** — a content-hash fix that would re-ingest affected policies once.
 
@@ -210,41 +211,45 @@ The agent sandbox cannot run any of this. The user's testing is the project's
 only real verification, so **unverified changes are listed here until a real
 run confirms them**, then moved to "Recently shipped".
 
-### 1. Run the test suite — first real run found two harness bugs, both fixed; re-run needed
+### 1. Run the test suite — **green as of 2026-07-30**; one acceptance step left
 
 ```powershell
 Import-Module Pester -MinimumVersion 5.0
 Invoke-Pester ./tests
 ```
 
-**The user ran this for the first time on 2026-07-29.** Two problems surfaced,
-both now fixed and pushed, **neither yet re-verified**:
+The user's first run (2026-07-29, Pester 6.0.1) found two harness bugs — a
+Pester 6 incompatibility and a real parse-breaking bug in
+`Test-MDMWinsOverGP.ps1` (R-16) — both fixed the same day (see "Recently
+shipped"). **Their re-run on 2026-07-30 came back clean: 135 passed, 0
+failed, 2 skipped** (the deliberate R-08/R-15 skips — by design, not
+breakage). This is the suite's first genuinely confirmed green run.
 
-- **Pester 6 rejects a `BeforeEach`/`AfterEach` written directly at file scope**
-  ("Each test setup is not supported in root") — 5 of the 8 files used that
-  pattern, which Pester 5 allowed. Fixed by wrapping each file's whole body in
-  one outer `Describe`; root-level `BeforeAll`/`AfterAll` were never affected
-  and needed no change. See `tests/README.md` "Pester version" — **new test
-  files must follow this wrapped shape from the start.**
-- **`MDMWinsOverGPToolKit/Test-MDMWinsOverGP.ps1` did not parse at all** —
-  `SuiteIntegrity.Tests.ps1`'s parse check caught a real `$labelText:`
-  variable/colon ambiguity around line 1646 that made the entire script fail
-  to parse, not just the one function. Fixed by delimiting with `${labelText}`.
-  Recorded as **R-16** in `docs/REVIEW-PHASE0.md` — this is a genuinely new bug
-  class the Phase 0.1 review's three target classes didn't cover, found only
-  because the suite finally ran real PowerShell.
+**One acceptance step remains before Issue #14 is fully closeable**: prove
+the suite actually catches a real break, not just that it's green when
+nothing's wrong. From the repo root:
 
-**Ask the user to re-run `Invoke-Pester ./tests`** (their install is Pester
-6.0.1; both fixes are written to work on 5.x and 6.x — see `tests/README.md`).
-Their first run was 12 passed / 104 failed / 2 containers erroring outright
-from these two problems — expect that number to change substantially and
-**fix whatever the next real run turns up**, since the assertions themselves
-are still completely unverified. Needs no tenant, no credentials and no
-network.
+```powershell
+# 1. Break something real: comment out the null/empty-assignment filter.
+#    In scripts/Backup-IntunePolicies.ps1 (~line 692), change:
+#      $assignments = @(@($rawAssignments) | Where-Object { $_ } | ForEach-Object { Resolve-Assignment -Assignment $_ })
+#    to:
+#      $assignments = @(@($rawAssignments) | ForEach-Object { Resolve-Assignment -Assignment $_ })
+#    (just delete "Where-Object { $_ } | ")
 
-Two tests are `-Skip`ped **on purpose** and would fail if run: they assert the
-fixed behaviour for open findings R-08 and R-15. That is by design, not
-breakage — see `tests/README.md`.
+Invoke-Pester ./tests
+# Expect real failures now - specifically the R-02 regression tests in
+# Backup.Script.Tests.ps1 and SettingsCatalogSnapshot.Script.Tests.ps1
+# ("a policy with no assignments").
+
+# 2. Revert the change (git checkout the file, or undo the edit by hand),
+#    then confirm green again:
+git checkout -- scripts/Backup-IntunePolicies.ps1
+Invoke-Pester ./tests
+```
+
+Once that round-trip (red → revert → green) is confirmed, Issue #14 is done
+and should be closed on GitHub.
 
 **New since this run: `tests/Toolkit.PureFunctions.Tests.ps1`**, added after
 the first real run above and not yet exercised by any real run at all. It
@@ -289,9 +294,11 @@ already fixed — is in **`docs/REVIEW-PHASE0.md`**, indexed R-01…R-16.
    copies a function's real source out of the `.ps1`, and whole-script runs
    against an offline Graph fake — and `tests/SuiteIntegrity.Tests.ps1` fails
    if any test file ever redefines a production function name again. Full
-   rationale in `tests/README.md`. **Caveat: the suite's first real run (2026-07-29)
-   found two harness bugs (Pester 6 compatibility, and R-16 below); both are
-   fixed but not yet re-verified** — see "Needs verification" above.
+   rationale in `tests/README.md`. **Confirmed green 2026-07-30**: 135 passed,
+   0 failed, 2 skipped as designed. The first run (2026-07-29) found two
+   harness bugs (Pester 6 compatibility, and R-16 below), both fixed and now
+   verified by the clean re-run. **One acceptance step still open**: the
+   deliberate-break round-trip — see "Needs verification" above.
 2. ~~**`MDMWinsOverGPToolKit/README.md` has a garbled intro section.**~~
    **Fixed** (Issue #16) — the first 126 lines were replaced; the rest of the
    file is untouched. See "Recently shipped".
@@ -376,6 +383,11 @@ already fixed — is in **`docs/REVIEW-PHASE0.md`**, indexed R-01…R-16.
 
 ## Recently shipped
 
+- **The Pester suite's first confirmed green run** (2026-07-30): 135 passed,
+  0 failed, 2 skipped (R-08 and R-15, by design). Confirms both fixes from
+  the previous entry actually work, not just that they were plausible on
+  desk-check. Only the deliberate-break acceptance step remains before #14
+  can close — see "Closing #14" above.
 - **First tests for `MDMWinsOverGPToolKit/`** (item B, known issue #12,
   pure-functions half only). New file `tests/Toolkit.PureFunctions.Tests.ps1`
   covers `Normalize-PolicyName`, `Get-TokenSet`, `Get-JaccardScore` and
