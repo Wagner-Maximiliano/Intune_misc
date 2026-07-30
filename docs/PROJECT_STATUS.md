@@ -325,7 +325,19 @@ already fixed — is in **`docs/REVIEW-PHASE0.md`**, indexed R-01…R-16.
    sessions. See AGENT_ONBOARDING §2.
 5. **Branch deletion fails with HTTP 403** from the agent environment. Merged
    branches must be deleted by the user via the GitHub UI. (An agent session
-   with local `git` can delete a merged branch directly if asked.)
+   with local `git` can delete a merged branch directly if asked — three were
+   cleaned up this way on 2026-07-30, see "Branches" below.)
+15. **An orphan branch nobody has triaged: `claude/intune-gpo-policy-binding-7m496u`.**
+    Two commits, **no PR, and no mention anywhere in these docs until now** —
+    it binds GPO GUIDs and CSP OMA-URIs into the overlap results
+    (+320 lines in `Test-MDMWinsOverGP.ps1`, +36 in the toolkit README).
+    Checked 2026-07-30: it **parses clean** (41 functions) and is **current with
+    `main`** — 0 commits behind, and it already carries the R-16 `${labelText}`
+    fix, so it is not stale and would not regress anything. What is missing is
+    any evidence it was ever **run on a real device**, which is what this
+    feature is entirely about. Deliberately **not merged** on the agent's own
+    judgement; the user was asked on 2026-07-30 and chose to leave it. Triage it
+    before it rots — either run it on hardware and merge, or delete it.
 6. **StrictMode coverage is split, and the docs used to deny it.**
    `MDMWinsOverGPToolKit/` sets `Set-StrictMode -Version 2.0` in all three
    scripts; **the five files in `scripts/` set none.** AGENT_ONBOARDING,
@@ -393,6 +405,27 @@ already fixed — is in **`docs/REVIEW-PHASE0.md`**, indexed R-01…R-16.
     because the suite's parse check finally ran real PowerShell. Worth a
     reminder: "the MDM toolkit was clean" (Phase 0.1 headline) meant clean on
     the classes the review went looking for, not clean on everything.
+
+---
+
+## Branches — current state (2026-07-30)
+
+| Branch | State | What to do |
+|---|---|---|
+| `main` | — | Has **no `docs/`**. Do not start a session here. |
+| `claude/platform-bootstrap` | Unmerged, no PR. **All Phase 0 work + every doc.** | Keep working here. The user was asked on 2026-07-30 about merging and chose to leave it unmerged for now, so the "check out this branch first" instruction in `AGENT_ONBOARDING.md` **still stands**. |
+| `claude/intune-gpo-policy-binding-7m496u` | Unmerged, no PR, untriaged | See known issue #15. Not abandoned, not approved — parked. |
+
+**Deleted on 2026-07-30** after confirming their content was in `main`:
+`claude/fleet-remote-invoke` (PR #12), `claude/mdm-wins-over-gpo-script-wov07d`
+(PRs #9/#10/#11), `claude/feetsummary-additional-columns-qfd0br` (PR #22).
+
+⚠️ **`git branch -r --merged` is not sufficient here.** PR #22 was
+**squash-merged**, so its branch tip is not an ancestor of `main` and both
+`--merged` and `git cherry` reported it as unmerged even though every line was
+already in `main`. Confirm containment with `git diff --stat origin/main
+origin/<branch>` (empty output = fully contained) or by checking the PR's merge
+commit with `git merge-base --is-ancestor`, before deleting anything.
 
 ---
 
