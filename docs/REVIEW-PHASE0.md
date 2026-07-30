@@ -62,6 +62,35 @@ Related: `ARCHITECTURE.md` claimed path portability — `$PSScriptRoot` with an
 
 ---
 
+## ⚠️ Scope of the 2026-07-30 AutomationNull correction — read before doubting R-03/R-05/R-13
+
+R-02 below was found to rest on a false premise once the code was finally
+executed. **Only R-02 is affected.** The other findings that mention "an empty
+`List[object]` arrives as `$null`" are still correct, and their fixes still
+stand. Measured on Windows PowerShell 5.1, 2026-07-30:
+
+| Behaviour | literal `$null` | AutomationNull (function emitted nothing) |
+|---|---|---|
+| `@(x).Count` | **1** | **0** ← the only divergence |
+| `[Parameter(Mandatory)]` binder | rejects | **rejects** — identical |
+| `x.Count`, StrictMode off | `0` | `0` — identical |
+| `x.Count`, StrictMode 2.0 | throws | **throws** — identical |
+| `$null -eq x` | true | true — indistinguishable by inspection |
+
+So:
+
+- **R-02 — affected.** Its whole argument runs through `@($rawAssignments)`
+  becoming a one-element array. It does not. See the correction below.
+- **R-03, R-13 — unaffected.** Both are binder rejections, and the binder
+  rejects both values identically. Real crashes, correctly fixed.
+- **R-05 — unaffected.** `.Count` behaves identically on both. Latent under
+  StrictMode exactly as described.
+
+The rule of thumb: **a finding is only suspect if it depends on `@(...)`
+*wrapping* the value.** Everything else treats the two alike.
+
+---
+
 ## Fixed in this commit
 
 ### R-02 — HIGH — A policy with no assignments aborted the backup
@@ -531,9 +560,22 @@ verified against the files before anything here was accepted.** That mattered:
 - The Policy Backup report surfaced R-01, which contradicted the brief it was
   given and three of our own docs. Verified and upheld.
 - That same report asserted `Get-MgGraphAllPages` "always returns a
-  `List[object]` (never null)". **That is wrong** — PowerShell enumerates an
-  IEnumerable on output, so an empty list yields `$null`. The distinction is
-  what makes R-02 a live crash rather than a benign no-op, so accepting the
-  claim would have understated the most serious finding in this review.
+  `List[object]` (never null)". We called that wrong and said the distinction
+  is "what makes R-02 a live crash rather than a benign no-op."
 
-Verification is not optional here, in both directions.
+  **⚠️ Revised 2026-07-30, after actually running it.** Both sides were partly
+  wrong, and the subagent was closer to right than we were. The list *is*
+  enumerated on output, so the call site does not receive a `List[object]` —
+  that much we had correct. But what it receives is **AutomationNull**, not
+  `$null`, and `@(AutomationNull)` is an *empty* array. R-02 really was "a
+  benign no-op" on that path. We rejected the subagent's claim, substituted a
+  more confident wrong one, and shipped it as the review's headline HIGH.
+
+  The failure was not insufficient scepticism — it was **arbitrating a
+  disagreement about runtime behaviour by reasoning instead of by execution**.
+  Neither party could run the line, so the more assertive prose won. One
+  `@(F).Count` would have settled it in seconds.
+
+**Verification is not optional here, in both directions — and "verification"
+means running it.** Where a claim is about what PowerShell *does*, desk-checking
+is not verification; it is a second opinion with the same blind spot.

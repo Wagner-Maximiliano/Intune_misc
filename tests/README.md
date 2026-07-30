@@ -65,6 +65,14 @@ what actually landed on disk. Named regression tests exist for R-02, R-03,
 R-04, R-05, R-13 and R-14; each cites its finding in
 `docs/REVIEW-PHASE0.md`.
 
+**A caution the R-02 tests earned the hard way.** A test that passes both with
+and against the code it claims to cover is not coverage. The original "policy
+with no assignments" tests passed whether or not `Where-Object { $_ }` was
+present, because the fixture never produced the value that clause filters — see
+the corrected R-02. When you add a regression test, **delete the fix and confirm
+the test fails**, then put it back. That is the only way to know which line the
+test is actually pinned to.
+
 ---
 
 ## Deliberately failing tests

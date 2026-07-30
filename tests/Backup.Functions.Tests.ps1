@@ -243,11 +243,18 @@ Describe 'Resolve-Assignment' {
     }
 
     It 'rejects $null, which is why its callers must filter first (R-02)' {
-        # Get-MgGraphAllPages emits nothing for a policy with no assignments,
-        # so the caller's @($rawAssignments) is a ONE-element array holding
-        # $null. This binder rejection is what aborted the backup. The
-        # production fix is the caller's Where-Object { $_ }, not a change
-        # here - so this test pins the behaviour that fix depends on.
+        # CORRECTED 2026-07-30. This comment used to say Get-MgGraphAllPages
+        # emitting nothing leaves the caller's @($rawAssignments) as a
+        # ONE-element array holding $null. It does not: a function that emits
+        # nothing returns AutomationNull, and @(AutomationNull) is EMPTY, so
+        # the caller's pipeline runs zero times and never reaches this binder.
+        #
+        # The assertion itself still holds and is still worth pinning: the
+        # binder does reject a real $null, which is what the caller's
+        # Where-Object { $_ } guards against when a null appears as an ELEMENT
+        # inside a populated collection. That path is covered end-to-end by
+        # 'drops a null element in the assignments collection' in
+        # Backup.Script.Tests.ps1.
         { Resolve-Assignment -Assignment $null } | Should -Throw
     }
 }

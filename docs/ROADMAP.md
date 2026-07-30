@@ -18,9 +18,12 @@ Scope is **both toolsets in full** — see D-008.
       toolkit was clean on all three bug classes; every defect was in
       `scripts/`. Two live crashes fixed, plus three docs corrected for a
       false StrictMode/path-portability premise.
-- [ ] **Fix the test suite** so it exercises production code instead of
-      reimplementing it — **written, and confirmed green 2026-07-30: 135
-      passed, 0 failed, 2 skipped as designed** (Issue #14, D-012).
+- [x] **Fix the test suite** so it exercises production code instead of
+      reimplementing it — **done and closed 2026-07-30: 137 passed, 0 failed,
+      2 skipped as designed**, and the deliberate-break round-trip confirmed
+      (Issue #14, D-012). That last step is what exposed R-02's false premise —
+      the documented break turned out to be a no-op; see the scope note at the
+      top of `docs/REVIEW-PHASE0.md`.
       `TestHelpers.ps1` and its 21 copies are gone; the suite loads real
       function source by AST and runs whole scripts against an offline Graph
       fake, and a guard test stops the copies returning. Writing it found and
@@ -31,10 +34,6 @@ Scope is **both toolsets in full** — see D-008.
       each file in one outer `Describe`) and, via its own parse check, a
       genuine `Test-MDMWinsOverGP.ps1` parse failure (**R-16**, fixed); the
       re-run confirmed both fixes actually work. See `tests/README.md`.
-      **Remaining**: confirm a deliberate break in `scripts/` turns the suite
-      red, then revert and confirm green again. That last step is the
-      Issue's own acceptance criterion and needs an interpreter the agent
-      sandbox does not have.
 - [ ] **Adopt `Set-StrictMode -Version 2.0` in `scripts/`** — the five files
       there have none. **Sequencing matters**: fix the latent findings first
       (R-05, R-09), or they all become crashes simultaneously. Best folded
