@@ -156,9 +156,12 @@ Otherwise the binder rejects a legitimately empty array as "no value supplied":
 
 - `learn.microsoft.com` → 403, `raw.githubusercontent.com` → 404 from this
   sandbox. Don't build anything that scrapes Microsoft docs at runtime.
-- Branch deletion fails with HTTP 403; the user deletes merged branches via
-  the GitHub UI.
-- No `gh` CLI. Use the GitHub MCP tools.
+- **`gh` CLI availability varies by session — check, don't assume.** As of
+  2026-07-30 it is present and authenticated on the user's machine (scopes:
+  `repo`, `workflow`, `read:org`, `gist`), which also means branch deletion
+  works from there. Where it is absent, use the GitHub MCP tools, and expect
+  branch deletion to fail with HTTP 403 — the user then deletes merged branches
+  via the GitHub UI.
 
 ---
 
