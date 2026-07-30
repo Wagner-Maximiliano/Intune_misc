@@ -106,9 +106,13 @@ traps, both also real incidents here:
   *before* the body runs, a tolerant function body does not save you and a
   call-site `@()` wrapper does not fix it — fix the declaration.
 - `@($null)` is a **one-element array containing `$null`**, not an empty
-  array. So `@($maybeNull) | ForEach-Object { ... }` still runs once, with
-  `$_ = $null`. Filter with `Where-Object { $_ }` when the producer can
-  yield nothing.
+  array — **but only when the value is a literal `$null`** (a missing
+  property, an unset variable, an explicit `return $null`). A function that
+  emitted *nothing* yields `AutomationNull` instead, and `@(AutomationNull)`
+  is **empty**. `$null -eq $x` is true for both, so desk-checking cannot
+  distinguish them. This confusion produced a wrong HIGH finding that survived
+  the full code review and four sessions (R-02, corrected 2026-07-30). If a
+  claim turns on which one you have, **run the line**.
 - A function ending `return $list` on a `List[object]` does **not** return
   the list — PowerShell enumerates an IEnumerable on output, so an empty one
   yields `$null` at the call site. Wrap the call in `@(...)`.
@@ -125,10 +129,19 @@ traps, both also real incidents here:
   *automatic variables*. Using one as a loop variable silently shadows it.
   (`foreach ($event in ...)` once made every Event ID report as `0`.)
 
-### 2. You cannot run PowerShell here. Say so.
+### 2. Check for a PowerShell interpreter before assuming you have none.
 
-The agent sandbox has no PowerShell interpreter, no Windows, and no target
-devices. **You cannot test your changes.** You must:
+**This rule was rewritten on 2026-07-30.** It used to state flatly that no
+interpreter exists. A session that simply tried found Windows PowerShell 5.1
+with Pester 6.0.1 and ran the whole suite in ten seconds — and the first thing
+that produced was the discovery that a HIGH finding (R-02) had been wrong since
+the review, because the distinguishing behaviour is invisible to desk-checking.
+**Try to run it. The cost of trying is one command; the cost of assuming was
+four sessions of confident, wrong documentation.**
+
+If there genuinely is no interpreter in your environment, then the old rule
+applies unchanged — and note that a tenant and target devices are still the
+user's to provide either way. In that case:
 
 - Desk-check instead: brace/paren balance, trace every `.Count` back to its
   assignment, trace control flow by hand.

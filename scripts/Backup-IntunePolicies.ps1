@@ -678,16 +678,23 @@ foreach ($policy in $policies) {
         # observed to return a thinner assignment target object that omits the
         # device filter fields (deviceAndAppManagementAssignmentFilterId/Type).
         # The dedicated endpoint returns the full target object.
-        # Get-MgGraphAllPages ends in `return $results` on a List[object], and
-        # PowerShell enumerates an IEnumerable on output - so a policy with no
-        # assignments yields $null here, NOT an empty list. @($null) is then a
-        # ONE-element array containing $null, so an unguarded pipeline would
-        # call Resolve-Assignment -Assignment $null, which a Mandatory
-        # parameter rejects outright ("because it is null") and aborts the run
-        # under $ErrorActionPreference='Stop'. Unassigned policies are common.
-        # Where-Object drops the phantom null; the outer @() wraps the whole
-        # pipeline (not just its input) so zero results stay an empty array
-        # rather than collapsing back to $null.
+        # Get-MgGraphAllPages ends in `return $results` on a List[object], which
+        # PowerShell enumerates on output, so a policy with no assignments emits
+        # zero objects. That makes $rawAssignments AutomationNull, not a literal
+        # $null - and @(AutomationNull) is an EMPTY array, so the pipeline runs
+        # zero times. (The one-element @($null) trap is real, but only for a
+        # literal $null such as a missing property; it does not apply here.)
+        #
+        # The outer @() is what matters for the unassigned case: without it the
+        # empty pipeline assigns AutomationNull and the snapshot serialises
+        # "Assignments": null instead of []. Unassigned policies are common, and
+        # a null there is what makes the restore path's R-04 reachable.
+        #
+        # Where-Object guards a different, rarer shape: a null *element* inside a
+        # populated collection is a real $null, which Resolve-Assignment's
+        # Mandatory parameter rejects at bind time. Graph is not known to emit
+        # that, but the guard is one clause and the failure would abort the
+        # policy. Both are covered in tests/Backup.Script.Tests.ps1.
         $rawAssignments = Get-MgGraphAllPages -Uri "beta/deviceManagement/configurationPolicies/$id/assignments"
         $assignments = @(@($rawAssignments) | Where-Object { $_ } | ForEach-Object { Resolve-Assignment -Assignment $_ })
         $flat = ConvertTo-FlatSettings -Settings $policy.settings

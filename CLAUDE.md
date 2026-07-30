@@ -25,9 +25,14 @@ Quick map:
 
 ## Hard rules
 
-1. **You cannot run PowerShell here.** No interpreter, no Windows, no target
-   devices. Desk-check your work and **say explicitly in your final message
-   that it is unverified.** Never imply you tested something you didn't.
+1. **Check whether you can run PowerShell before assuming you can't.** This
+   used to read "you cannot" flatly; on 2026-07-30 a session ran the suite
+   natively (Windows PowerShell 5.1, Pester 6.0.1) and that single fact
+   overturned a HIGH review finding four sessions of desk-checking had got
+   wrong (R-02). **Try it first.** If there is no interpreter, desk-check and
+   **say explicitly in your final message that it is unverified** — never imply
+   you tested something you didn't. Target devices and a tenant are a separate
+   question; those are still the user's to provide.
    You can still *write* tests: `tests/` is an offline Pester suite over the
    real `scripts/` code that the user can run in seconds. Change `scripts/`,
    add a test — and **never copy production code into a test** (D-012;
@@ -82,12 +87,31 @@ Untyped params are affected too, not just `[object[]]`. The binder rejects
 *before* the body runs, so a tolerant body or a call-site `@()` will not save
 you. Two HIGH bugs in the Phase 0.1 review were exactly this.
 
-### `@($null)` is a one-element array, not an empty one
+### `@($null)` is a one-element array — but only for a *literal* `$null`
 
-`@($maybeNull) | ForEach-Object { ... }` still runs once with `$_ = $null`.
-Use `Where-Object { $_ }` when the producer can legitimately yield nothing.
-Relatedly, `return $list` on a `List[object]` enumerates on output — an empty
-list arrives as `$null` at the call site, so wrap the call in `@(...)`.
+`@($maybeNull) | ForEach-Object { ... }` runs once with `$_ = $null` when
+`$maybeNull` came from something that really produced `$null`: a missing
+property, an unset variable, an explicit `return $null`. Use
+`Where-Object { $_ }` there.
+
+**It does NOT apply to a function that emitted nothing.** That assigns
+`AutomationNull`, not `$null`. The two are indistinguishable by `$null -eq $x`,
+so desk-checking cannot tell them apart, but they behave oppositely:
+
+```powershell
+@($null).Count            # 1  - literal null
+function F { }            # emits nothing
+@(F).Count                # 0  - AutomationNull
+```
+
+This exact confusion produced a wrong HIGH finding that survived a code review
+and four sessions (`docs/REVIEW-PHASE0.md` R-02). **If a claim turns on which
+of the two you have, run the line — do not reason about it.**
+
+Relatedly, `return $list` on a `List[object]` enumerates on output, so an empty
+list arrives as `AutomationNull`. Wrapping the *call* in `@(...)` is still
+correct and still load-bearing — it is what keeps an empty result serialising as
+`[]` rather than `null`.
 
 ### `.Count` on a possibly-`$null` value throws
 

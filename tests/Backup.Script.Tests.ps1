@@ -216,6 +216,39 @@ Describe 'Backup-IntunePolicies.ps1 - assignment resolution' {
         $snap  = Get-Content -LiteralPath $files[0].FullName -Raw | ConvertFrom-Json
         @($snap.Assignments)[0].GroupName | Should -Be '<unresolved: g-deleted>'
     }
+
+    It 'drops a null element in the assignments collection instead of aborting the policy' {
+        # This is what `Where-Object { $_ }` at Backup-IntunePolicies.ps1:692 is
+        # actually for, and until now nothing exercised it. The "no assignments
+        # at all" fixture above does NOT: Get-MgGraphAllPages is a *function*
+        # emitting zero objects, so $rawAssignments is AutomationNull, and
+        # @(AutomationNull) is an EMPTY array - not the one-element @($null) the
+        # code comment used to claim. Removing the filter therefore changed
+        # nothing there.
+        #
+        # A null *inside* a populated collection is the one shape that does
+        # produce a real $null in the pipeline, which Resolve-Assignment's
+        # Mandatory parameter rejects at bind time. The shape is synthetic -
+        # Graph is not known to emit it - but the guard is cheap and its twin in
+        # Get-IntuneSettingsCatalogSnapshot.ps1 has no try/catch around it, so
+        # there a null element would end the whole run rather than one policy.
+        $policy = New-FakePolicy -Id 'p-nullelem' -Name 'Null Element Policy'
+        Add-FakeGraphRoute -UriLike '*configurationPolicies*expand*' -Response @{ value = @($policy) }
+        Add-FakeGraphRoute -UriLike '*configurationPolicies/*/assignments' -Response @{
+            value = @($null, (New-FakeAssignment -GroupId 'g-real'))
+        }
+        Add-FakeGraphRoute -UriLike 'v1.0/groups/g-real*' -Response @{ displayName = 'Wave 2' }
+
+        $out = & $script:BackupScript -OutputPath $script:Out -SkipExcel 6>&1 3>&1 | Out-String
+        $out | Should -Not -Match 'failed at line'
+
+        $files       = @(Get-SnapshotFile -OutputPath $script:Out)
+        $snap        = Get-Content -LiteralPath $files[0].FullName -Raw | ConvertFrom-Json
+        $assignments = @($snap.Assignments)
+
+        $assignments.Count          | Should -Be 1
+        $assignments[0].GroupName   | Should -Be 'Wave 2'
+    }
 }
 
 Describe 'Backup-IntunePolicies.ps1 - change detection' {

@@ -4,13 +4,19 @@
 Update it in the same commit as any change. If this file and the code
 disagree, the code is right and this file is a bug.
 
-- **Last updated**: 2026-07-29
-- **Updated by**: three sessions today — one rewrote the MDM toolkit README
-  intro (Issue #16), one fixed the two bugs the suite's first real run found,
-  the third added the first tests for `MDMWinsOverGPToolKit/` (item B, pure
-  functions only)
+- **Last updated**: 2026-07-30
+- **Updated by**: a session that ran the deliberate-break acceptance test on a
+  real interpreter, found the suite was right to stay green (the chosen break
+  was a no-op), corrected the wrong premise behind review finding R-02, and
+  closed Issue #14
 - **Current phase**: Phase 0 — Bootstrap & consolidation (review and tests done,
-  module extraction next)
+  **#14 closed**, module extraction next)
+
+> **⚠️ An agent session on this machine can run PowerShell.** Windows PowerShell
+> 5.1 with Pester 6.0.1, confirmed 2026-07-30. The docs asserted the opposite
+> for months and it cost a wrong HIGH finding. **Try `Invoke-Pester ./tests`
+> before claiming anything is unverifiable.** A tenant and target devices are
+> still the user's to provide.
 
 > ## ⚠️ Where this work lives — read before you branch
 >
@@ -106,8 +112,8 @@ Full documentation: `MDMWinsOverGPToolKit/README.md`.
 | # | Task | Issue | Depends on |
 |---|---|---|---|
 | ~~1~~ | ~~Full code review, both toolsets~~ — **done**, see `docs/REVIEW-PHASE0.md` | [#13](https://github.com/Wagner-Maximiliano/Intune_misc/issues/13) | — |
-| 2 | Fix the test suite so it tests production code — **written and confirmed green (135/0/2 skipped); one deliberate-break round-trip left before the Issue closes** | [#14](https://github.com/Wagner-Maximiliano/Intune_misc/issues/14) | #13 ✅ |
-| 3 | Extract shared `Continuum.*` modules | [#15](https://github.com/Wagner-Maximiliano/Intune_misc/issues/15) | #13 ✅, #14 ✅ |
+| ~~2~~ | ~~Fix the test suite so it tests production code~~ — **done and closed 2026-07-30**. 137 passed / 0 failed / 2 skipped, and the deliberate-break round-trip is confirmed. | [#14](https://github.com/Wagner-Maximiliano/Intune_misc/issues/14) | #13 ✅ |
+| 3 | Extract shared `Continuum.*` modules — **now genuinely unblocked** | [#15](https://github.com/Wagner-Maximiliano/Intune_misc/issues/15) | #13 ✅, #14 ✅ |
 | ~~4~~ | ~~Fix garbled `MDMWinsOverGPToolKit/README.md` intro~~ — **done** | [#16](https://github.com/Wagner-Maximiliano/Intune_misc/issues/16) | — (independent) |
 
 ---
@@ -134,33 +140,50 @@ your final message that it is unverified.
 
 ---
 
-### ⛔ Do NOT start these yet
+### ⛔ Previously blocked — now cleared
 
-**#15 (module extraction) is blocked in practice, even though its table row
-says its dependencies are met.** The suite that makes a refactor
-trustworthy **has never actually been executed** — see "Needs verification"
-below. Extracting modules is a large, behaviour-preserving refactor whose
-entire safety argument rests on that suite going green first. Starting it now
-means a big unverifiable diff on top of an unverified safety net.
-
-Same reasoning for two other tempting items: **unifying logging** (61
+**#15 (module extraction) is unblocked as of 2026-07-30.** The blocker was that
+the suite had never actually been executed. It has now been run repeatedly, and
+— more importantly — *proven to fail when production code breaks*, which is the
+property the refactor's safety argument actually needs. The same clearance
+applies to the two items parked behind it: **unifying logging** (61
 `Write-Host` calls in `scripts/`) and the **`_Index.xlsx` merge-not-wipe fix**.
-Both change working code in ways the suite would need to catch.
 
-Wait for the user's Pester run. Do items A–E instead.
+Items B–E below are still perfectly good work; they are just no longer the
+*only* safe work.
 
 ---
 
-### Closing #14 — one step left, needs the user
+### Closing #14 — done, and it did not go as expected
 
-The suite is **green** (135 passed, 0 failed, 2 skipped, confirmed
-2026-07-30). Its last acceptance criterion — "a deliberate break in a
-production script causes a test failure" — still needs a PowerShell
-interpreter: mutate something in `scripts/` on purpose (e.g. drop the
-`Where-Object { $_ }` at `Backup-IntunePolicies.ps1:692`), confirm
-`Invoke-Pester ./tests` goes red, then revert and confirm green again. See
-"Needs verification on real hardware" above for the exact steps. Once that
-round-trips, close #14.
+**Closed 2026-07-30.** The final acceptance criterion — "a deliberate break in
+production code turns the suite red" — initially appeared to fail: the chosen
+break (deleting `Where-Object { $_ } | ` at `Backup-IntunePolicies.ps1:692`)
+left the suite at an unchanged 135/0/2 across repeated runs.
+
+**The suite was right. The break was a no-op, and the reason is a bug in this
+project's own documentation.** R-02 claimed that an empty `Get-MgGraphAllPages`
+yields a literal `$null`, which `@(...)` turns into a one-element array that
+then crashes `Resolve-Assignment`'s Mandatory binder. Step 2 is false: a
+function emitting nothing returns `AutomationNull`, not `$null`, and
+`@(AutomationNull)` is an **empty** array. The pipeline runs zero times, so
+there is nothing for `Where-Object` to filter. `$null -eq $x` is true for both
+values, which is exactly why desk-checking never caught it.
+
+What was verified with the interpreter instead:
+
+| Break | Result |
+|---|---|
+| Delete `Where-Object { $_ }` (the user's choice) | **Green** — genuinely a no-op on this path |
+| Delete the **outer `@()`** on the same line | **Red** — `"Assignments"` serialises as `{}` not `[]`; caught by "records Assignments as an empty array, not null" |
+| Delete `Where-Object { $_ }` **after adding the new null-element test** | **Red** in both scripts, citing the exact line |
+
+So the round-trip (red → revert → green) **is** confirmed; it just needed a
+break that was actually load-bearing. Two new regression tests now cover the
+`Where-Object` clause so it can never again be silently deletable — see D-017.
+`docs/REVIEW-PHASE0.md` R-02 carries the correction; `CLAUDE.md` and
+`AGENT_ONBOARDING.md` now state the `@($null)` rule with its AutomationNull
+caveat.
 
 ---
 
@@ -178,12 +201,10 @@ When #15 does become unblocked, two things are already scaffolded for it:
   collapse into `Continuum.Core`, they become redundant and should be deleted
   rather than left asserting a tautology.
 
-**Three things are waiting on the user.** None of them block items A–E above:
+**Two things are waiting on the user.** Neither blocks items B–E above:
 
-1. **The deliberate-break round-trip** that closes #14 (just above) — the
-   suite itself is already green.
-2. **R-11** — when to adopt `Set-StrictMode` in `scripts/`.
-3. **R-15** — a content-hash fix that would re-ingest affected policies once.
+1. **R-11** — when to adopt `Set-StrictMode` in `scripts/`.
+2. **R-15** — a content-hash fix that would re-ingest affected policies once.
 
 R-11 and R-15 are both in `docs/REVIEW-PHASE0.md`. Don't act on either
 unilaterally.
@@ -211,12 +232,22 @@ The agent sandbox cannot run any of this. The user's testing is the project's
 only real verification, so **unverified changes are listed here until a real
 run confirms them**, then moved to "Recently shipped".
 
-### 1. Run the test suite — **green as of 2026-07-30**; one acceptance step left
+### 1. ~~Run the test suite~~ — **done; nothing left here**
 
 ```powershell
 Import-Module Pester -MinimumVersion 5.0
 Invoke-Pester ./tests
 ```
+
+**Current: 137 passed, 0 failed, 2 skipped** (2026-07-30, Windows PowerShell
+5.1 / Pester 6.0.1). The two extra tests over the previous 135 are the new
+null-element regression tests. `Toolkit.PureFunctions.Tests.ps1` — flagged
+below as never having been exercised — has now run clean, including under its
+`Set-StrictMode -Version 2.0`.
+
+The deliberate-break acceptance step is **complete**; see "Closing #14" above
+for what it actually found, which was not what was expected. The historical
+record of that step is kept below for context.
 
 The user's first run (2026-07-29, Pester 6.0.1) found two harness bugs — a
 Pester 6 incompatibility and a real parse-breaking bug in
@@ -225,38 +256,17 @@ shipped"). **Their re-run on 2026-07-30 came back clean: 135 passed, 0
 failed, 2 skipped** (the deliberate R-08/R-15 skips — by design, not
 breakage). This is the suite's first genuinely confirmed green run.
 
-**One acceptance step remains before Issue #14 is fully closeable**: prove
-the suite actually catches a real break, not just that it's green when
-nothing's wrong. From the repo root:
+**The acceptance step this section used to describe was run on 2026-07-30, and
+the break it recommended turned out to be a no-op.** Deleting
+`Where-Object { $_ } | ` at `Backup-IntunePolicies.ps1:692` does not change any
+observable behaviour, because the "phantom null" it was written to drop does
+not exist on that path — see "Closing #14" above and the corrected R-02 in
+`docs/REVIEW-PHASE0.md`. If you want to re-demonstrate that the suite catches
+breaks, delete the **outer `@()`** on that line instead, or delete the
+`Where-Object` now that the null-element tests exist. Both go red.
 
-```powershell
-# 1. Break something real: comment out the null/empty-assignment filter.
-#    In scripts/Backup-IntunePolicies.ps1 (~line 692), change:
-#      $assignments = @(@($rawAssignments) | Where-Object { $_ } | ForEach-Object { Resolve-Assignment -Assignment $_ })
-#    to:
-#      $assignments = @(@($rawAssignments) | ForEach-Object { Resolve-Assignment -Assignment $_ })
-#    (just delete "Where-Object { $_ } | ")
-
-Invoke-Pester ./tests
-# Expect real failures now - specifically the R-02 regression tests in
-# Backup.Script.Tests.ps1 and SettingsCatalogSnapshot.Script.Tests.ps1
-# ("a policy with no assignments").
-
-# 2. Revert the change (git checkout the file, or undo the edit by hand),
-#    then confirm green again:
-git checkout -- scripts/Backup-IntunePolicies.ps1
-Invoke-Pester ./tests
-```
-
-Once that round-trip (red → revert → green) is confirmed, Issue #14 is done
-and should be closed on GitHub.
-
-**New since this run: `tests/Toolkit.PureFunctions.Tests.ps1`**, added after
-the first real run above and not yet exercised by any real run at all. It
-needs the same `Invoke-Pester ./tests` command — no separate step — but is
-called out here because it is the first file running under
-`Set-StrictMode -Version 2.0` rather than `-Off` (see "Recently shipped"), so
-a StrictMode-specific failure here would be new territory for this suite.
+`tests/Toolkit.PureFunctions.Tests.ps1` has now been exercised and passes,
+including under its `Set-StrictMode -Version 2.0`.
 
 ### 2. Outstanding tenant checks — from the review (commit `8ab55c1`) and this one
 
@@ -294,11 +304,10 @@ already fixed — is in **`docs/REVIEW-PHASE0.md`**, indexed R-01…R-16.
    copies a function's real source out of the `.ps1`, and whole-script runs
    against an offline Graph fake — and `tests/SuiteIntegrity.Tests.ps1` fails
    if any test file ever redefines a production function name again. Full
-   rationale in `tests/README.md`. **Confirmed green 2026-07-30**: 135 passed,
-   0 failed, 2 skipped as designed. The first run (2026-07-29) found two
-   harness bugs (Pester 6 compatibility, and R-16 below), both fixed and now
-   verified by the clean re-run. **One acceptance step still open**: the
-   deliberate-break round-trip — see "Needs verification" above.
+   rationale in `tests/README.md`. **Closed 2026-07-30**: 137 passed, 0 failed,
+   2 skipped as designed, and the deliberate-break round-trip is confirmed —
+   though it took three attempts to find a break that was actually load-bearing,
+   which is how R-02's wrong premise surfaced. See "Closing #14" above.
 2. ~~**`MDMWinsOverGPToolKit/README.md` has a garbled intro section.**~~
    **Fixed** (Issue #16) — the first 126 lines were replaced; the rest of the
    file is untouched. See "Recently shipped".
@@ -307,10 +316,16 @@ already fixed — is in **`docs/REVIEW-PHASE0.md`**, indexed R-01…R-16.
    write is suppressed, so "both configured" is self-contradictory for a real
    conflict. A secondary `MdmWinningProvider` promotion path was added to
    partially address it; **its real-world effect has never been confirmed.**
-4. **Nothing is verifiable in the agent sandbox** — no PowerShell, no Windows,
-   no devices. All agent changes are desk-checked only. See AGENT_ONBOARDING §2.
+4. ~~**Nothing is verifiable in the agent sandbox.**~~ **No longer true on this
+   machine** (2026-07-30): an agent session ran Windows PowerShell 5.1 and
+   Pester 6.0.1 directly and executed the full suite. A tenant and target
+   devices are still the user's to provide, so Graph-facing and device-facing
+   behaviour remains desk-checked. **Check for an interpreter before claiming
+   you have none** — assuming otherwise is what let R-02 stay wrong for four
+   sessions. See AGENT_ONBOARDING §2.
 5. **Branch deletion fails with HTTP 403** from the agent environment. Merged
-   branches must be deleted by the user via the GitHub UI.
+   branches must be deleted by the user via the GitHub UI. (An agent session
+   with local `git` can delete a merged branch directly if asked.)
 6. **StrictMode coverage is split, and the docs used to deny it.**
    `MDMWinsOverGPToolKit/` sets `Set-StrictMode -Version 2.0` in all three
    scripts; **the five files in `scripts/` set none.** AGENT_ONBOARDING,
@@ -383,6 +398,27 @@ already fixed — is in **`docs/REVIEW-PHASE0.md`**, indexed R-01…R-16.
 
 ## Recently shipped
 
+- **Issue #14 closed, and R-02 corrected in the process** (2026-07-30). The
+  deliberate-break acceptance step was run on a real interpreter and appeared to
+  fail — the suite stayed at 135/0/2 with the break in place. It was not a stale
+  save or a wrong file; the break was genuinely a no-op. **R-02's stated
+  mechanism was wrong**: a function that emits nothing returns `AutomationNull`,
+  not `$null`, and `@(AutomationNull)` is an *empty* array, so the one-element
+  `@($null)` the finding described never materialises on that path. `$null -eq
+  $x` is true for both values, which is why a code review, a suite rewrite and
+  four sessions of desk-checking all read past it. R-02 *was* a real crash
+  before commit `96f7b09` changed `@($policy.assignments)` (a property access —
+  a genuine `$null`) to a function call; the fix landed on already-unreachable
+  code. Changes: two new regression tests that actually reach the
+  `Where-Object { $_ }` guard (a null *element* inside a populated collection,
+  the one shape that produces a real `$null`) in both
+  `Backup.Script.Tests.ps1` and `SettingsCatalogSnapshot.Script.Tests.ps1`;
+  corrected comments in both production scripts; R-02 corrected in
+  `REVIEW-PHASE0.md`; the `@($null)` rule in `CLAUDE.md` and
+  `AGENT_ONBOARDING.md` amended with the AutomationNull caveat; D-017 records
+  why the guard was kept rather than deleted as dead code. **Suite: 137 passed,
+  0 failed, 2 skipped**, and verified red for two separate load-bearing breaks.
+  No production behaviour changed — comments only.
 - **The Pester suite's first confirmed green run** (2026-07-30): 135 passed,
   0 failed, 2 skipped (R-08 and R-15, by design). Confirms both fixes from
   the previous entry actually work, not just that they were plausible on

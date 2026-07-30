@@ -491,3 +491,43 @@ drift silently, exactly the failure mode D-012 exists to prevent.
   file quietly testing under the wrong rules with nothing to catch it; the
   whole point of D-012's StrictMode guard is that it is mechanical, not
   reviewer-dependent.
+
+---
+
+## D-017 — Keep the `Where-Object { $_ }` assignment guard, and give it a real test, rather than deleting it as dead code
+
+**Date**: 2026-07-30 · **Context**: closing Issue #14
+
+Running the suite for the first time proved that the `Where-Object { $_ }`
+clause in both backup scripts' assignment pipelines is **not** what stops an
+unassigned policy from crashing. R-02's step 2 was wrong: an empty
+`Get-MgGraphAllPages` returns `AutomationNull`, and `@(AutomationNull)` is an
+empty array, so the pipeline never runs and the phantom `$null` the clause was
+added to drop never exists on that path. Deleting the clause changes nothing
+observable, which is exactly why the deliberate-break acceptance test came back
+green twice.
+
+**Decision**: keep the clause, and add a regression test that actually reaches
+it (a null *element* inside a populated `value` array — the one shape that does
+produce a real `$null`).
+
+**Why**:
+- The guard is one pipeline clause with no measurable cost.
+- Its twin in `Get-IntuneSettingsCatalogSnapshot.ps1` sits in a script with **no
+  per-policy `try/catch`**, so an unguarded null element would end the entire
+  run, not degrade one policy. Verified: removing it there throws out of the
+  script body.
+- Untested defensive code is the thing this project keeps getting burned by. A
+  guard nothing exercises is indistinguishable from a guard that doesn't work.
+
+**Rejected.**
+- *Delete it as dead code.* Defensible on "don't handle scenarios that can't
+  happen" — but "Graph is not known to emit a null element" is weaker than
+  "Graph cannot", and the reasoning that said this path was safe is precisely
+  the reasoning that just turned out to be wrong. Removing a guard on the
+  strength of the analysis that was mistaken is the wrong lesson to draw.
+- *Keep it and leave it untested, noting the finding in docs only.* That is the
+  status quo that hid the error for four sessions.
+- *Rewrite the guard as an explicit `if ($null -ne $_)` inside `ForEach-Object`.*
+  Same semantics, more lines, and it would still need the same test to be
+  trustworthy.

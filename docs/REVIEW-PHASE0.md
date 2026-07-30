@@ -71,27 +71,52 @@ Related: `ARCHITECTURE.md` claimed path portability — `$PSScriptRoot` with an
 $assignments = @($rawAssignments) | ForEach-Object { Resolve-Assignment -Assignment $_ }
 ```
 
-Three-step failure:
+> **⚠️ CORRECTED 2026-07-30, after the first execution of this code path.**
+> Step 2 below was **wrong**, and step 3 therefore never happened on this path.
+> The original text is kept struck through because the same false premise is
+> quoted in several other places. Read the correction that follows it.
+
+~~Three-step failure:~~
 
 1. `Get-MgGraphAllPages` ends in `return $results` on a `List[object]`.
    PowerShell **enumerates an IEnumerable on output**, so an empty list emits
-   nothing and `$rawAssignments` is **`$null`**, not an empty list.
-2. `@($null)` is a **one-element array containing `$null`** — not an empty
-   array. So `ForEach-Object` runs **once**, with `$_ = $null`.
-3. `Resolve-Assignment`'s `[Parameter(Mandatory)]$Assignment` rejects `$null`
-   at bind time. With `$ErrorActionPreference='Stop'`, the run aborts.
+   nothing. ✅ *This part is correct.*
+2. ~~`@($null)` is a one-element array containing `$null`, so `ForEach-Object`
+   runs once with `$_ = $null`.~~ ❌ **False here.** A function that emits
+   *nothing* does not assign `$null` — it assigns
+   `System.Management.Automation.Internal.AutomationNull.Value`. That compares
+   `-eq $null`, which is why desk-checking read it as `$null`, but
+   `@(AutomationNull)` is an **empty** array (`.Count` = 0) and the pipeline
+   runs **zero** times. `@($null).Count` really is 1, but only for a *literal*
+   `$null` — e.g. a missing property, which is what the pre-`96f7b09` code
+   (`@($policy.assignments)`) had.
+3. ~~`Resolve-Assignment`'s Mandatory parameter rejects `$null` and the run
+   aborts.~~ Never reached for an unassigned policy.
 
-**Crashes today — binder rejection, independent of StrictMode.** Unassigned
-Settings Catalog policies are common (staged/not-yet-deployed), so this is
-reachable in an ordinary tenant.
+**What was actually true.** R-02 was a real crash in the `$expand` era
+(`@($policy.assignments)` — a property access, so a literal `$null`). Commit
+`96f7b09` switched to the dedicated per-policy call, and from that moment the
+crash was unreachable. The `Where-Object { $_ }` added here fixed a bug that
+had already stopped existing.
 
-Secondary defect in the same line: the `@()` wrapped the pipeline's *input*,
-not its *output*, so `$assignments` was a bare scalar for exactly one
-assignment and `$null` for none — and that `$null` was written straight into
-the snapshot JSON as `"Assignments": null`, which is what makes R-04 reachable.
+**What the same line's `@()` fix did do, and it is real.** The original `@()`
+wrapped the pipeline's *input*, not its *output*, so `$assignments` collapsed
+to `AutomationNull` for a policy with no assignments and was written into the
+snapshot as `"Assignments": null` — which is what makes R-04 reachable. Removing
+the outer `@()` still turns the suite red today; verified 2026-07-30.
 
-**Fix**: `Where-Object { $_ }` drops the phantom null; the outer `@()` now
-wraps the whole pipeline.
+**What `Where-Object { $_ }` is worth keeping for.** A null *element* inside a
+populated collection is a genuine `$null`, and the binder does reject it. Graph
+is not known to emit that shape, but the guard is one clause and in
+`Get-IntuneSettingsCatalogSnapshot.ps1` — which has no per-policy `try/catch` —
+it would end the whole run. Both scripts now have a regression test for exactly
+that (`drops a null element in the assignments collection`), so the clause is no
+longer untested. Kept, not removed.
+
+**Method note.** This error survived a full code review, a test-suite rewrite,
+and four sessions of desk-checking because `$null -eq $x` is true for
+AutomationNull and nothing in the sandbox could run the distinguishing line. It
+was found in ~10 minutes with an interpreter.
 
 ### R-03 — HIGH — A policy with no settings aborted the backup
 `Backup-IntunePolicies.ps1:298`, `Import-PolicyHistoryToDatabase.ps1:156`

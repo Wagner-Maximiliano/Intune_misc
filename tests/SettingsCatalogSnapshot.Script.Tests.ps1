@@ -119,6 +119,31 @@ Describe 'Get-IntuneSettingsCatalogSnapshot.ps1 - assignment resolution' {
         $snap  = Get-Content -LiteralPath $files[0].FullName -Raw | ConvertFrom-Json
         @($snap.Assignments)[0].FilterId | Should -BeNullOrEmpty
     }
+
+    It 'drops a null element in the assignments collection instead of ending the run' {
+        # Coverage for `Where-Object { $_ }` at
+        # Get-IntuneSettingsCatalogSnapshot.ps1:228. See the twin test in
+        # Backup.Script.Tests.ps1 for why the "no assignments at all" fixture
+        # above does not reach this guard: an empty Get-MgGraphAllPages returns
+        # AutomationNull, and @(AutomationNull) is empty, not @($null).
+        # This script has no per-policy try/catch, so an unguarded null element
+        # would abort the entire snapshot rather than one policy.
+        $policy = New-FakePolicy -Id 'p-nullelem' -Name 'Null Element Policy'
+        Add-FakeGraphRoute -UriLike '*configurationPolicies*expand*' -Response @{ value = @($policy) }
+        Add-FakeGraphRoute -UriLike '*configurationPolicies/*/assignments' -Response @{
+            value = @($null, (New-FakeAssignment -GroupId 'g-real'))
+        }
+        Add-FakeGraphRoute -UriLike 'v1.0/groups/g-real*' -Response @{ displayName = 'Wave 2' }
+
+        { & $script:SnapshotScript -OutputPath $script:Out 6>&1 3>&1 | Out-Null } | Should -Not -Throw
+
+        $files       = @(Get-SnapshotFile -OutputPath $script:Out)
+        $snap        = Get-Content -LiteralPath $files[0].FullName -Raw | ConvertFrom-Json
+        $assignments = @($snap.Assignments)
+
+        $assignments.Count        | Should -Be 1
+        $assignments[0].GroupName | Should -Be 'Wave 2'
+    }
 }
 
 Describe 'Get-IntuneSettingsCatalogSnapshot.ps1 - options' {
