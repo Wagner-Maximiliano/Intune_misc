@@ -494,13 +494,36 @@ It does not collect or analyze anything itself. It only:
    remote script's own exit code (see "Exit codes" above), where its ZIP was
    collected to, and a plain-English `Outcome` (`Success`, `ConflictsFound`,
    `DegradedEvidence`, `RemoteScriptFailed`, `Offline`, `ConnectionFailed`,
-   `TimedOut`). In `Copy` mode (the default), each device's `Manifest.json` is
+   `TimedOut`, `DisconnectedMidRun`). In `Copy` mode (the default), each device's `Manifest.json` is
    also read back to add per-device metrics: `MdmWinsOverGpEnabled`,
    `MdmWinsOverGpState`, `PolicyManagerRowCount`, `GpoSettingsCount`,
    `VerifiedMappingCount`, `ConfirmedOverlapCount`, `HeuristicOverlapCount`,
    and `ConflictsFoundCount`. These are blank for `RemotePath` mode and for
    devices that never produced a manifest (e.g. `Offline`,
-   `ConnectionFailed`, `TimedOut`).
+   `ConnectionFailed`, `TimedOut`, `DisconnectedMidRun`).
+
+### Devices that go offline part-way through
+
+A device that answers the initial `Test-Connection` can still disappear
+before its run finishes - laptops sleep, users undock, VPNs drop. On a fleet
+of any size this is routine, and it does not disturb any other device:
+
+- The device is recorded as **`DisconnectedMidRun`**, distinct from
+  `RemoteScriptFailed`, so the summary separates "this device vanished" from
+  "this device's script failed". The `Detail` column gives the session and
+  job state.
+- Every other device in the same batch is unaffected. Results are collected
+  per device rather than in one bulk read, so a dropped machine cannot
+  discard the results of the machines running alongside it.
+- The run continues through the remaining batches and still writes
+  `FleetSummary.csv` at the end.
+- Any evidence the device produced is still on the device. Re-run just the
+  affected devices to collect it - filter `FleetSummary.csv` on
+  `Outcome = DisconnectedMidRun` for the list.
+
+Because sessions are opened per batch rather than all at once, a device that
+goes offline while waiting its turn is simply reported as `ConnectionFailed`
+when its batch starts.
 
    `FleetSummary.csv` is written even when the run fails part-way through, so
    a fleet-wide summary is never lost to a single device's unexpected result.
@@ -631,7 +654,8 @@ reported as `ConnectionFailed` with the reason in the `Detail` column,
 rather than failing the whole run.
 
 This script's own exit code is a fleet-wide rollup: `1` if any device failed
-to run or connect (`RemoteScriptFailed`, `ConnectionFailed`, `TimedOut`),
+to run or connect (`RemoteScriptFailed`, `ConnectionFailed`, `TimedOut`,
+`DisconnectedMidRun`),
 else `2` if any device reported conflicts or degraded evidence, else `0`.
 Always read `FleetSummary.csv` for the per-device breakdown.
 

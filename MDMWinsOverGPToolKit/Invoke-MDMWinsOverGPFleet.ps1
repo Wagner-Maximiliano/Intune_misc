@@ -180,12 +180,20 @@
                            - see the Detail column.
       TimedOut           - the remote run did not finish within
                            -RemoteTimeoutSeconds.
+      DisconnectedMidRun - the device was reachable when its run started but
+                           its session was gone by the time results were
+                           collected: it went offline, slept, or lost network
+                           part-way through. Expected on a large fleet and
+                           handled without disturbing any other device; the
+                           run continues and the summary is still produced.
+                           Any evidence it made is still on the device -
+                           re-run just these devices to collect it.
 
     Additional per-device columns in the summary CSV, sourced from each
     device's own Manifest.json (Copy mode only - see the Manifest-read
     comment near the ManifestJson property below; left blank for
     RemotePath mode and for devices that never produced a manifest, e.g.
-    Offline/ConnectionFailed/TimedOut):
+    Offline/ConnectionFailed/TimedOut/DisconnectedMidRun):
       MdmWinsOverGpEnabled  - whether MDMWinsOverGP is enabled in the
                               effective PolicyManager device store.
       MdmWinsOverGpState    - the human-readable interpretation of that
@@ -746,12 +754,49 @@ function Invoke-FleetBatch {
         if ($child.Location) { $childJobsByComputer[$child.Location] = $child }
     }
 
-    $jobResults = @()
-    try {
-        $jobResults = @(Receive-Job -Job $icmJob -Keep -ErrorAction SilentlyContinue)
-    }
-    catch {
-        Write-Log -Level WARN -Message "Receive-Job reported an error while collecting results: $($_.Exception.Message)"
+    # -----------------------------------------------------------------------
+    # Results are received one child job at a time, NOT with a single
+    # Receive-Job over the parent.
+    #
+    # A device that goes offline part-way through leaves its child job broken,
+    # and receiving the parent surfaces that as an error for the whole
+    # pipeline. With $ErrorActionPreference = 'Stop' that aborted the bulk
+    # receive, so $jobResults came back empty and EVERY device in the batch
+    # lost its result - including the ones that had finished perfectly. One
+    # machine going to sleep discarded the work of everything alongside it.
+    #
+    # Per-child receive contains the damage to the device it actually belongs
+    # to. Each child's Location is also stamped on as PSComputerName when the
+    # object arrived without one, so results stay attributable even from a
+    # session that is already coming apart.
+    # -----------------------------------------------------------------------
+    $jobResults = New-Object System.Collections.Generic.List[object]
+
+    foreach ($child in $icmJob.ChildJobs) {
+        $location = [string](Get-OptionalProperty -InputObject $child -Name 'Location' -Default '')
+
+        try {
+            $childItems = @(Receive-Job -Job $child -Keep -ErrorAction SilentlyContinue)
+
+            foreach ($childItem in $childItems) {
+                if ($null -eq $childItem) { continue }
+
+                if (-not $childItem.PSObject.Properties['PSComputerName'] -and
+                    -not [string]::IsNullOrWhiteSpace($location)) {
+                    Add-Member -InputObject $childItem -NotePropertyName 'PSComputerName' `
+                        -NotePropertyValue $location -Force -ErrorAction SilentlyContinue
+                }
+
+                $jobResults.Add($childItem)
+            }
+        }
+        catch {
+            # Deliberately not fatal, and deliberately not marked here: the
+            # unreturned-device pass below inspects the session and job state
+            # and classifies this device properly.
+            $label = if ($location) { $location } else { 'unknown device' }
+            Write-Log -Level WARN -Message "[$label] Could not collect this device's result: $($_.Exception.Message)"
+        }
     }
 
     # Sessions keyed by name, so the evidence pull below can find the right
@@ -856,7 +901,20 @@ function Invoke-FleetBatch {
             # $collectionFolder as your account. This is the second half of
             # avoiding the double-hop - the device never writes to the share.
             # ------------------------------------------------------------------
-            if ($DeliveryMode -eq 'Copy' -and $itemZipPath) {
+            # A device can return its result and then drop before its evidence
+            # is pulled back, so the session is re-checked here rather than
+            # assumed still good from when the batch started. Checking gives a
+            # message that says what happened; not checking gave a confusing
+            # transport-level error against a session that no longer existed.
+            $deviceSession = $sessionsByName[$computerName]
+            $deviceSessionState = [string](Get-OptionalProperty -InputObject $deviceSession -Name 'State' -Default 'Unknown')
+            $deviceSessionUsable = ($null -ne $deviceSession -and $deviceSessionState -eq 'Opened')
+
+            if ($DeliveryMode -eq 'Copy' -and $itemZipPath -and -not $deviceSessionUsable) {
+                Write-Log -Level WARN -Message "[$computerName] The remote run finished, but its session was $deviceSessionState before the evidence ZIP could be retrieved - the device most likely went offline mid-run. Its evidence is still at '$itemZipPath' on the device; re-run this device or collect that file manually."
+                $row.Detail = "$($row.Detail) Evidence not retrieved: the session was $deviceSessionState (device went offline mid-run). The ZIP remains on the device at '$itemZipPath'."
+            }
+            elseif ($DeliveryMode -eq 'Copy' -and $itemZipPath) {
                 try {
                     if (-not (Test-Path -LiteralPath $collectionFolder)) {
                         New-Item -ItemType Directory -Path $collectionFolder -Force -ErrorAction Stop | Out-Null
@@ -881,8 +939,14 @@ function Invoke-FleetBatch {
                 Write-Log -Level WARN -Message "[$computerName] Last lines of remote output:`n$itemOutputTail"
             }
 
-            # Clean up the device's temp folder once its ZIP is safely retrieved.
-            if ($DeliveryMode -eq 'Copy' -and -not $KeepRemoteTempFolder -and $itemWorkFolder) {
+            # Clean up the device's temp folder once its ZIP is safely
+            # retrieved. Skipped outright on a dead session - there is nothing
+            # to clean up over, and the leftover folder is harmless (and is
+            # what -KeepRemoteTempFolder would have left anyway).
+            if ($DeliveryMode -eq 'Copy' -and -not $KeepRemoteTempFolder -and $itemWorkFolder -and -not $deviceSessionUsable) {
+                Write-Log -Level WARN -Message "[$computerName] Could not remove the temp folder '$itemWorkFolder': the session was $deviceSessionState. Remove it manually if the device comes back online."
+            }
+            elseif ($DeliveryMode -eq 'Copy' -and -not $KeepRemoteTempFolder -and $itemWorkFolder) {
                 try {
                     Invoke-Command -Session $sessionsByName[$computerName] -ErrorAction Stop -ArgumentList $itemWorkFolder -ScriptBlock {
                         param($Folder)
@@ -913,21 +977,37 @@ function Invoke-FleetBatch {
         }
     }
 
-    # Any connected device that never returned a result: timed out, or the
-    # session died mid-run.
+    # Any connected device that never returned a result: timed out, dropped
+    # off the network mid-run, or failed some other way.
+    #
+    # A device that was reachable at the start and goes offline part-way
+    # through is an expected event on a fleet of this size - laptops sleep,
+    # users undock, VPNs drop - not an error condition for the run. It is
+    # classified as its own outcome so the summary distinguishes "this device
+    # disappeared" from "this device's script failed", and so it is obvious
+    # which devices simply need re-running.
     foreach ($session in $Sessions) {
         $name = $session.ComputerName
         $row = $results[$name]
         if ($row.FinishedAt) { continue }
 
-        if (-not $completed -and $childJobsByComputer.ContainsKey($name) -and $childJobsByComputer[$name].State -eq 'Running') {
+        $childState = if ($childJobsByComputer.ContainsKey($name)) {
+            [string]$childJobsByComputer[$name].State
+        } else { 'Unknown' }
+
+        $sessionState = [string](Get-OptionalProperty -InputObject $session -Name 'State' -Default 'Unknown')
+
+        if (-not $completed -and $childState -eq 'Running') {
             $row.Outcome = 'TimedOut'
             $row.Detail = "The remote run had not finished after $RemoteTimeoutSeconds second(s). It continues on the device; re-run with a higher -RemoteTimeoutSeconds or collect its evidence manually."
         }
+        elseif ($sessionState -ne 'Opened') {
+            $row.Outcome = 'DisconnectedMidRun'
+            $row.Detail = "The device was reachable when the run started but its session was $sessionState by the time results were collected (job state: $childState). It most likely went offline, slept, or lost network part-way through. Any evidence it produced is still on the device; re-run this device to collect it."
+        }
         else {
-            $childState = if ($childJobsByComputer.ContainsKey($name)) { $childJobsByComputer[$name].State } else { 'Unknown' }
             $row.Outcome = 'RemoteScriptFailed'
-            $row.Detail = "No result was returned for this device (job state: $childState)."
+            $row.Detail = "No result was returned for this device (job state: $childState, session state: $sessionState)."
         }
         Write-Log -Level WARN -Message "[$name] $($row.Detail)"
     }
@@ -1059,7 +1139,7 @@ if ($DeliveryMode -eq 'Copy') {
 }
 Write-Log -Message "Summary written to '$SummaryOutputPath'."
 
-$failureOutcomes = @('RemoteScriptFailed', 'ConnectionFailed', 'TimedOut')
+$failureOutcomes = @('RemoteScriptFailed', 'ConnectionFailed', 'TimedOut', 'DisconnectedMidRun')
 $anyFailures = @($summaryRows | Where-Object { $failureOutcomes -contains $_.Outcome }).Count -gt 0
 $anyConflicts = @($summaryRows | Where-Object { @('ConflictsFound', 'DegradedEvidence') -contains $_.Outcome }).Count -gt 0
 
