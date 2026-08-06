@@ -483,20 +483,61 @@ It does not collect or analyze anything itself. It only:
    per row).
 2. Confirms each device is online with `Test-Connection` before touching it.
 3. Runs the existing, unmodified `Test-MDMWinsOverGP.ps1` on every online
-   device as a child `powershell.exe` process (throttled, `-ThrottleLimit`,
-   default 10 concurrent), capturing that script's own 0/1/2/3 exit code.
+   device as a child `powershell.exe` process, capturing that script's own
+   0/1/2/3 exit code. Devices are processed in **batches of
+   `-ThrottleLimit`** (default 10): each batch opens its own remote sessions,
+   runs to completion, retrieves its evidence, and closes those sessions
+   before the next batch starts, so no more than `-ThrottleLimit` devices are
+   ever connected and running at once.
 4. Collects each device's evidence ZIP centrally.
 5. Writes one `FleetSummary.csv` covering every device: online or not, the
    remote script's own exit code (see "Exit codes" above), where its ZIP was
    collected to, and a plain-English `Outcome` (`Success`, `ConflictsFound`,
    `DegradedEvidence`, `RemoteScriptFailed`, `Offline`, `ConnectionFailed`,
-   `TimedOut`). In `Copy` mode (the default), each device's `Manifest.json` is
+   `TimedOut`, `DisconnectedMidRun`). In `Copy` mode (the default), each device's `Manifest.json` is
    also read back to add per-device metrics: `MdmWinsOverGpEnabled`,
    `MdmWinsOverGpState`, `PolicyManagerRowCount`, `GpoSettingsCount`,
    `VerifiedMappingCount`, `ConfirmedOverlapCount`, `HeuristicOverlapCount`,
    and `ConflictsFoundCount`. These are blank for `RemotePath` mode and for
    devices that never produced a manifest (e.g. `Offline`,
-   `ConnectionFailed`, `TimedOut`).
+   `ConnectionFailed`, `TimedOut`, `DisconnectedMidRun`).
+
+### Devices that go offline part-way through
+
+A device that answers the initial `Test-Connection` can still disappear
+before its run finishes - laptops sleep, users undock, VPNs drop. On a fleet
+of any size this is routine, and it does not disturb any other device:
+
+- The device is recorded as **`DisconnectedMidRun`**, distinct from
+  `RemoteScriptFailed`, so the summary separates "this device vanished" from
+  "this device's script failed". The `Detail` column gives the session and
+  job state.
+- Every other device in the same batch is unaffected. Results are collected
+  per device rather than in one bulk read, so a dropped machine cannot
+  discard the results of the machines running alongside it.
+- The run continues through the remaining batches and still writes
+  `FleetSummary.csv` at the end.
+- Any evidence the device produced is still on the device. Re-run just the
+  affected devices to collect it - filter `FleetSummary.csv` on
+  `Outcome = DisconnectedMidRun` for the list.
+
+Because sessions are opened per batch rather than all at once, a device that
+goes offline while waiting its turn is simply reported as `ConnectionFailed`
+when its batch starts.
+
+   `FleetSummary.csv` is written even when the run fails part-way through, so
+   a fleet-wide summary is never lost to a single device's unexpected result.
+
+**Version skew between the fleet script and the device script.** The
+per-device metric columns come from each device's `Manifest.json`, whose
+schema belongs to whichever copy of `Test-MDMWinsOverGP.ps1` actually ran
+there. If a device runs an older copy than this fleet script expects, the
+metric columns it does not recognise are left blank and a warning names that
+device - the run itself is unaffected, and the evidence ZIP is complete
+either way. If you see that warning for every device, update the
+`Test-MDMWinsOverGP.ps1` at `-ScriptSourcePath`: in `Copy` mode that file is
+what gets pushed, and it is easy to update the fleet script alone and leave
+the pushed copy stale.
 
 ```powershell
 # Run as an already-elevated domain admin account - the current session's
@@ -584,7 +625,7 @@ failed run on the device itself.
 | `-Credential` | current session's identity | Only needed to connect as a different account than the one running the script. |
 | `-ResultsShare` | fleet run's `CollectedEvidence` folder | Where evidence ZIPs are collected. Written to by the management server in `Copy` mode, by the device in `RemotePath` mode. |
 | `-RemoteScriptArguments` | (none) | Extra arguments forwarded as-is to `Test-MDMWinsOverGP.ps1` (e.g. `@('-GenerateMappings','-SinceHours','48')`). Do not pass `-ResultsShare` or `-OutputRoot` here - both are managed for you. |
-| `-ThrottleLimit` | 10 | Max devices processed concurrently. |
+| `-ThrottleLimit` | 10 | Max devices processed concurrently. Devices are run in batches of this size; sessions are opened and closed per batch, so this is a hard ceiling on concurrent sessions and concurrent remote runs. `-RemoteTimeoutSeconds` applies per batch, so worst-case wall clock is roughly `(devices / ThrottleLimit) * RemoteTimeoutSeconds`. |
 | `-PingCount` | 2 | `Test-Connection` echoes per device before a session is attempted. |
 | `-RemoteTimeoutSeconds` | 1800 | How long to wait for the fleet before marking still-running devices `TimedOut`. Remote runs are not killed - this script just stops waiting. |
 | `-KeepRemoteTempFolder` | off | `Copy` mode only. Leaves the per-device temp folder (scripts, evidence, remote stdout log) on the device for inspection. |
@@ -613,7 +654,8 @@ reported as `ConnectionFailed` with the reason in the `Detail` column,
 rather than failing the whole run.
 
 This script's own exit code is a fleet-wide rollup: `1` if any device failed
-to run or connect (`RemoteScriptFailed`, `ConnectionFailed`, `TimedOut`),
+to run or connect (`RemoteScriptFailed`, `ConnectionFailed`, `TimedOut`,
+`DisconnectedMidRun`),
 else `2` if any device reported conflicts or degraded evidence, else `0`.
 Always read `FleetSummary.csv` for the per-device breakdown.
 

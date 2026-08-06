@@ -115,6 +115,15 @@
 .PARAMETER ThrottleLimit
     Maximum number of devices processed concurrently. Default 10.
 
+    Devices are processed in batches of this size: each batch opens its own
+    remote sessions, runs to completion, retrieves its evidence, and closes
+    those sessions before the next batch begins. At most this many devices
+    are ever connected and running at once, however large the device list is.
+
+    -RemoteTimeoutSeconds applies per batch, not to the whole run, so the
+    worst-case wall clock is roughly
+    (device count / ThrottleLimit) * RemoteTimeoutSeconds.
+
 .PARAMETER PingCount
     Number of Test-Connection echo requests used to decide whether a device
     is online before a session is attempted. Default 2 (a device only counts
@@ -171,12 +180,20 @@
                            - see the Detail column.
       TimedOut           - the remote run did not finish within
                            -RemoteTimeoutSeconds.
+      DisconnectedMidRun - the device was reachable when its run started but
+                           its session was gone by the time results were
+                           collected: it went offline, slept, or lost network
+                           part-way through. Expected on a large fleet and
+                           handled without disturbing any other device; the
+                           run continues and the summary is still produced.
+                           Any evidence it made is still on the device -
+                           re-run just these devices to collect it.
 
     Additional per-device columns in the summary CSV, sourced from each
     device's own Manifest.json (Copy mode only - see the Manifest-read
     comment near the ManifestJson property below; left blank for
     RemotePath mode and for devices that never produced a manifest, e.g.
-    Offline/ConnectionFailed/TimedOut):
+    Offline/ConnectionFailed/TimedOut/DisconnectedMidRun):
       MdmWinsOverGpEnabled  - whether MDMWinsOverGP is enabled in the
                               effective PolicyManager device store.
       MdmWinsOverGpState    - the human-readable interpretation of that
@@ -321,6 +338,65 @@ function Get-RemoteExitOutcome {
         3 { return 'DegradedEvidence' }
         default { return 'RemoteScriptFailed' }
     }
+}
+
+function Get-OptionalProperty {
+    <#
+        Reads a property that may legitimately not exist on the object,
+        returning $Default instead of throwing.
+
+        This script runs under Set-StrictMode -Version 2.0, where touching an
+        absent property is a terminating PropertyNotFoundStrict error, not
+        $null. Two kinds of object here are outside this script's control and
+        must never be assumed to carry a given property:
+
+          - Manifest.json, parsed from whatever version of
+            Test-MDMWinsOverGP.ps1 actually ran on the device. A device
+            running an older copy of the script writes an older manifest
+            schema, and a fleet is rarely all on the same version at once.
+          - Objects handed back by Receive-Job, which decorates results from
+            remote jobs with PSComputerName - but not every object that can
+            come out of that pipeline is so decorated.
+
+        Reading those defensively is what keeps one stale device from
+        aborting the whole fleet run.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowNull()]$InputObject,
+        [Parameter(Mandatory)][string]$Name,
+        $Default = $null
+    )
+
+    if ($null -eq $InputObject) { return $Default }
+
+    $property = $InputObject.PSObject.Properties[$Name]
+    if (-not $property) { return $Default }
+    if ($null -eq $property.Value) { return $Default }
+
+    return $property.Value
+}
+
+function Split-IntoBatches {
+    <#
+        Splits a list into consecutive batches of at most $BatchSize, so the
+        caller can bound how many devices are worked on at once. Returns an
+        array of arrays; an empty or zero-size input yields no batches.
+    #>
+    param(
+        [AllowEmptyCollection()][string[]]$Items,
+        [int]$BatchSize
+    )
+
+    $batches = New-Object System.Collections.Generic.List[object]
+    if (-not $Items -or $Items.Count -eq 0) { return $batches.ToArray() }
+    if ($BatchSize -lt 1) { $BatchSize = 1 }
+
+    for ($i = 0; $i -lt $Items.Count; $i += $BatchSize) {
+        $end = [Math]::Min($i + $BatchSize, $Items.Count) - 1
+        $batches.Add(@($Items[$i..$end]))
+    }
+
+    return $batches.ToArray()
 }
 
 $scriptRoot = $PSScriptRoot
@@ -502,48 +578,21 @@ Write-Log -Message "$($onlineDevices.Count) of $($deviceNames.Count) device(s) a
 # itself (as your account), so a UNC -ResultsShare needs no delegation.
 $collectionFolder = if (-not [string]::IsNullOrWhiteSpace($ResultsShare)) { $ResultsShare } else { Join-Path $fleetRunFolder 'CollectedEvidence' }
 
-$sessions = @()
-
-if ($onlineDevices.Count -gt 0) {
-
-    # -----------------------------------------------------------------------
-    # Establish sessions. Explicit PSSessions (rather than
-    # Invoke-Command -ComputerName) because Copy mode needs a session object
-    # to pull each evidence ZIP back with Copy-Item -FromSession.
-    # -----------------------------------------------------------------------
-    Write-Log -Message "Opening remote sessions to $($onlineDevices.Count) device(s)..."
-    $sessionErrors = $null
-    $sessionParams = @{
-        ComputerName  = $onlineDevices
-        ThrottleLimit = $ThrottleLimit
-        ErrorVariable = 'sessionErrors'
-        ErrorAction   = 'SilentlyContinue'
-    }
-    if ($Credential) { $sessionParams['Credential'] = $Credential }
-
-    $sessions = @(New-PSSession @sessionParams)
-
-    if ($sessionErrors) {
-        foreach ($errRecord in $sessionErrors) {
-            Write-Log -Level WARN -Message "Session error: $($errRecord.Exception.Message)"
-        }
-    }
-
-    $connectedNames = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($session in $sessions) { [void]$connectedNames.Add($session.ComputerName) }
-
-    foreach ($name in $onlineDevices) {
-        if (-not $connectedNames.Contains($name)) {
-            $results[$name].Outcome = 'ConnectionFailed'
-            $results[$name].Detail = 'Responded to ping, but a PowerShell remoting session could not be established. Common causes: WinRM is not enabled/reachable (Enable-PSRemoting), a firewall is blocking 5985/5986, or authentication failed.'
-            Write-Log -Level WARN -Message "Could not open a session to '$name'."
-        }
-    }
-
-    Write-Log -Message "$($sessions.Count) session(s) established."
-}
-
-if ($sessions.Count -gt 0) {
+# ---------------------------------------------------------------------------
+# Runs one batch of devices to completion: dispatch, wait, collect results and
+# evidence. Bounded by the caller to -ThrottleLimit devices per call.
+#
+# Sessions are opened and closed by the caller, one batch at a time, rather
+# than all at once for the whole fleet. -ThrottleLimit on New-PSSession only
+# governs how many connections are negotiated concurrently, not how many end
+# up open, and Invoke-Command -Session dispatches to every session it is
+# given - so opening every session up front meant the entire fleet ran at
+# once no matter what -ThrottleLimit was set to.
+# ---------------------------------------------------------------------------
+function Invoke-FleetBatch {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Sessions
+    )
 
     # -----------------------------------------------------------------------
     # The remote payload.
@@ -685,14 +734,14 @@ if ($sessions.Count -gt 0) {
         return $result
     }
 
-    Write-Log -Message "Running Test-MDMWinsOverGP.ps1 on $($sessions.Count) device(s) (ThrottleLimit=$ThrottleLimit)..."
+    Write-Log -Message "Running Test-MDMWinsOverGP.ps1 on $($Sessions.Count) device(s) (ThrottleLimit=$ThrottleLimit)..."
 
     $icmErrors = $null
-    $icmJob = Invoke-Command -Session $sessions -ScriptBlock $remoteScriptBlock -AsJob -JobName 'MDMWinsOverGPFleet' `
+    $icmJob = Invoke-Command -Session $Sessions -ScriptBlock $remoteScriptBlock -AsJob -JobName 'MDMWinsOverGPFleet' `
         -ArgumentList $DeliveryMode, $scriptPayload, $RemoteScriptPath, $ResultsShare, $RemoteScriptArguments, ([bool]$KeepRemoteTempFolder) `
         -ErrorVariable icmErrors -ErrorAction SilentlyContinue
 
-    foreach ($session in $sessions) { $results[$session.ComputerName].StartedAt = Get-Date }
+    foreach ($session in $Sessions) { $results[$session.ComputerName].StartedAt = Get-Date }
 
     $completed = Wait-Job -Job $icmJob -Timeout $RemoteTimeoutSeconds
 
@@ -705,122 +754,260 @@ if ($sessions.Count -gt 0) {
         if ($child.Location) { $childJobsByComputer[$child.Location] = $child }
     }
 
-    $jobResults = @()
-    try {
-        $jobResults = @(Receive-Job -Job $icmJob -Keep -ErrorAction SilentlyContinue)
-    }
-    catch {
-        Write-Log -Level WARN -Message "Receive-Job reported an error while collecting results: $($_.Exception.Message)"
+    # -----------------------------------------------------------------------
+    # Results are received one child job at a time, NOT with a single
+    # Receive-Job over the parent.
+    #
+    # A device that goes offline part-way through leaves its child job broken,
+    # and receiving the parent surfaces that as an error for the whole
+    # pipeline. With $ErrorActionPreference = 'Stop' that aborted the bulk
+    # receive, so $jobResults came back empty and EVERY device in the batch
+    # lost its result - including the ones that had finished perfectly. One
+    # machine going to sleep discarded the work of everything alongside it.
+    #
+    # Per-child receive contains the damage to the device it actually belongs
+    # to. Each child's Location is also stamped on as PSComputerName when the
+    # object arrived without one, so results stay attributable even from a
+    # session that is already coming apart.
+    # -----------------------------------------------------------------------
+    $jobResults = New-Object System.Collections.Generic.List[object]
+
+    foreach ($child in $icmJob.ChildJobs) {
+        $location = [string](Get-OptionalProperty -InputObject $child -Name 'Location' -Default '')
+
+        try {
+            $childItems = @(Receive-Job -Job $child -Keep -ErrorAction SilentlyContinue)
+
+            foreach ($childItem in $childItems) {
+                if ($null -eq $childItem) { continue }
+
+                if (-not $childItem.PSObject.Properties['PSComputerName'] -and
+                    -not [string]::IsNullOrWhiteSpace($location)) {
+                    Add-Member -InputObject $childItem -NotePropertyName 'PSComputerName' `
+                        -NotePropertyValue $location -Force -ErrorAction SilentlyContinue
+                }
+
+                $jobResults.Add($childItem)
+            }
+        }
+        catch {
+            # Deliberately not fatal, and deliberately not marked here: the
+            # unreturned-device pass below inspects the session and job state
+            # and classifies this device properly.
+            $label = if ($location) { $location } else { 'unknown device' }
+            Write-Log -Level WARN -Message "[$label] Could not collect this device's result: $($_.Exception.Message)"
+        }
     }
 
     # Sessions keyed by name, so the evidence pull below can find the right
     # one for each returned result.
     $sessionsByName = @{}
-    foreach ($session in $sessions) { $sessionsByName[$session.ComputerName] = $session }
+    foreach ($session in $Sessions) { $sessionsByName[$session.ComputerName] = $session }
 
     foreach ($item in $jobResults) {
-        $computerName = $item.PSComputerName
-        if (-not $computerName -or -not $results.ContainsKey($computerName)) { continue }
+        # Assigned before the try so the catch below can always reference it.
+        $computerName = ''
 
-        $row = $results[$computerName]
-        $row.FinishedAt = Get-Date
+        try {
+            # Receive-Job normally stamps PSComputerName onto objects returned by
+            # a remote job, but not everything that can come back through that
+            # pipeline carries it - and under Set-StrictMode -Version 2.0 reading
+            # an absent property is a TERMINATING error, not $null. Reading it
+            # directly meant a single undecorated object aborted the entire fleet
+            # run before FleetSummary.csv was ever written.
+            $computerName = [string](Get-OptionalProperty -InputObject $item -Name 'PSComputerName' -Default '')
 
-        if ($null -eq $item.ExitCode) {
-            $row.Outcome = 'RemoteScriptFailed'
-            $row.Detail = if ($item.ErrorDetail) { $item.ErrorDetail } else { 'The remote process did not report an exit code.' }
-            Write-Log -Level WARN -Message "[$computerName] $($row.Detail)"
-        }
-        else {
-            $row.ExitCode = [int]$item.ExitCode
-            $row.Outcome = Get-RemoteExitOutcome -ExitCode ([int]$item.ExitCode)
-            $row.Detail = "Test-MDMWinsOverGP.ps1 exited with code $($item.ExitCode)."
-            if ($item.ErrorDetail) { $row.Detail = "$($row.Detail) $($item.ErrorDetail)" }
-        }
-
-        # ------------------------------------------------------------------
-        # Per-device metrics from Manifest.json (Copy mode only - RemotePath
-        # mode never gives this management server a handle on the device's
-        # local evidence folder, only whatever -ResultsShare the device
-        # wrote to itself). Parsed leniently: a malformed/missing manifest
-        # just leaves these columns blank rather than failing the run.
-        # ------------------------------------------------------------------
-        if ($item.ManifestJson) {
-            try {
-                $manifest = $item.ManifestJson | ConvertFrom-Json -ErrorAction Stop
-                $row.MdmWinsOverGpEnabled  = [bool]$manifest.MdmWinsOverGpEnabled
-                $row.MdmWinsOverGpState    = $manifest.MdmWinsOverGpState
-                $row.PolicyManagerRowCount = $manifest.PolicyManagerRowCount
-                $row.GpoSettingsCount      = $manifest.GpoSettingsCount
-                $row.VerifiedMappingCount  = $manifest.VerifiedMappingCount
-                $row.ConfirmedOverlapCount = $manifest.ConfirmedOverlapCount
-                $row.HeuristicOverlapCount = $manifest.HeuristicOverlapCount
-                $row.ConflictsFoundCount   = $manifest.ConflictsFoundCount
+            if ([string]::IsNullOrWhiteSpace($computerName)) {
+                Write-Log -Level WARN -Message 'A job result carried no PSComputerName and could not be attributed to a device; skipping it. The device it belongs to will be reported below as not having returned a result.'
+                continue
             }
-            catch {
-                Write-Log -Level WARN -Message "[$computerName] Ran successfully but its Manifest.json could not be parsed for summary metrics: $($_.Exception.Message)"
-            }
-        }
+            if (-not $results.ContainsKey($computerName)) { continue }
 
-        # ------------------------------------------------------------------
-        # Copy mode evidence retrieval: pull the ZIP back over the session
-        # that is already authenticated, then let THIS machine write it to
-        # $collectionFolder as your account. This is the second half of
-        # avoiding the double-hop - the device never writes to the share.
-        # ------------------------------------------------------------------
-        if ($DeliveryMode -eq 'Copy' -and $item.ZipPath) {
-            try {
-                if (-not (Test-Path -LiteralPath $collectionFolder)) {
-                    New-Item -ItemType Directory -Path $collectionFolder -Force -ErrorAction Stop | Out-Null
+            $row = $results[$computerName]
+            $row.FinishedAt = Get-Date
+
+            # As with PSComputerName above, every field of the returned object is
+            # read defensively. The object is built on the device and crosses the
+            # remoting serializer to get here, so this script cannot assume any
+            # particular property survived the trip.
+            $itemExitCode   = Get-OptionalProperty -InputObject $item -Name 'ExitCode'
+            $itemErrorDetail = [string](Get-OptionalProperty -InputObject $item -Name 'ErrorDetail' -Default '')
+            $itemZipPath    = [string](Get-OptionalProperty -InputObject $item -Name 'ZipPath'    -Default '')
+            $itemOutputTail = [string](Get-OptionalProperty -InputObject $item -Name 'OutputTail' -Default '')
+            $itemWorkFolder = [string](Get-OptionalProperty -InputObject $item -Name 'WorkFolder' -Default '')
+
+            if ($null -eq $itemExitCode) {
+                $row.Outcome = 'RemoteScriptFailed'
+                $row.Detail = if ($itemErrorDetail) { $itemErrorDetail } else { 'The remote process did not report an exit code.' }
+                Write-Log -Level WARN -Message "[$computerName] $($row.Detail)"
+            }
+            else {
+                $row.ExitCode = [int]$itemExitCode
+                $row.Outcome = Get-RemoteExitOutcome -ExitCode ([int]$itemExitCode)
+                $row.Detail = "Test-MDMWinsOverGP.ps1 exited with code $itemExitCode."
+                if ($itemErrorDetail) { $row.Detail = "$($row.Detail) $itemErrorDetail" }
+            }
+
+            # ------------------------------------------------------------------
+            # Per-device metrics from Manifest.json (Copy mode only - RemotePath
+            # mode never gives this management server a handle on the device's
+            # local evidence folder, only whatever -ResultsShare the device
+            # wrote to itself). Parsed leniently: a malformed/missing manifest
+            # just leaves these columns blank rather than failing the run.
+            # ------------------------------------------------------------------
+            $manifestJson = Get-OptionalProperty -InputObject $item -Name 'ManifestJson' -Default ''
+            if (-not [string]::IsNullOrWhiteSpace([string]$manifestJson)) {
+                try {
+                    $manifest = $manifestJson | ConvertFrom-Json -ErrorAction Stop
+
+                    # Every field is read through Get-OptionalProperty rather than
+                    # accessed directly. The manifest schema belongs to whichever
+                    # version of Test-MDMWinsOverGP.ps1 actually ran on the device,
+                    # which is not necessarily the version this script expects - a
+                    # device running an older copy simply does not have these
+                    # properties. Under Set-StrictMode -Version 2.0 that threw on
+                    # the FIRST missing property, so one schema mismatch discarded
+                    # all eight metrics and logged a misleading "could not be
+                    # parsed" warning about a manifest that had parsed perfectly.
+                    # Now each field is filled if present and left blank if not.
+                    $enabled = Get-OptionalProperty -InputObject $manifest -Name 'MdmWinsOverGpEnabled'
+                    $row.MdmWinsOverGpEnabled  = if ($null -eq $enabled) { '' } else { [bool]$enabled }
+                    $row.MdmWinsOverGpState    = Get-OptionalProperty -InputObject $manifest -Name 'MdmWinsOverGpState'    -Default ''
+                    $row.PolicyManagerRowCount = Get-OptionalProperty -InputObject $manifest -Name 'PolicyManagerRowCount' -Default ''
+                    $row.GpoSettingsCount      = Get-OptionalProperty -InputObject $manifest -Name 'GpoSettingsCount'      -Default ''
+                    $row.VerifiedMappingCount  = Get-OptionalProperty -InputObject $manifest -Name 'VerifiedMappingCount'  -Default ''
+                    $row.ConfirmedOverlapCount = Get-OptionalProperty -InputObject $manifest -Name 'ConfirmedOverlapCount' -Default ''
+                    $row.HeuristicOverlapCount = Get-OptionalProperty -InputObject $manifest -Name 'HeuristicOverlapCount' -Default ''
+                    $row.ConflictsFoundCount   = Get-OptionalProperty -InputObject $manifest -Name 'ConflictsFoundCount'   -Default ''
+
+                    # A manifest that parsed but carried none of the expected
+                    # metric fields almost always means the device ran an older
+                    # Test-MDMWinsOverGP.ps1 than this script was written against.
+                    # Say so specifically - the generic warning sent people
+                    # looking for a corrupt file that was never corrupt.
+                    if ($null -eq $enabled -and
+                        -not $manifest.PSObject.Properties['ConflictsFoundCount']) {
+                        Write-Log -Level WARN -Message "[$computerName] Manifest.json parsed but contains none of the per-device metric fields. The device is most likely running an older Test-MDMWinsOverGP.ps1 than this fleet script expects; update the copy at -ScriptSourcePath. The evidence ZIP itself is unaffected."
+                    }
                 }
-                # The remote ZIP is already named "<Computer>-<timestamp>.zip"
-                # by Test-MDMWinsOverGP.ps1, so it cannot collide with
-                # another device's.
-                Copy-Item -FromSession $sessionsByName[$computerName] -LiteralPath $item.ZipPath `
-                    -Destination $collectionFolder -Force -ErrorAction Stop
-                $row.CollectedZip = Join-Path $collectionFolder (Split-Path -Path $item.ZipPath -Leaf)
-                Write-Log -Message "[$computerName] Evidence collected to '$($row.CollectedZip)'."
-            }
-            catch {
-                Write-Log -Level WARN -Message "[$computerName] Ran successfully but its evidence ZIP could not be retrieved to '$collectionFolder': $($_.Exception.Message)"
-                $row.Detail = "$($row.Detail) Evidence retrieval failed: $($_.Exception.Message)"
-            }
-        }
-
-        # Surface the tail of the remote console output when something went
-        # wrong, so a failure is diagnosable without logging on to the device.
-        if ($row.Outcome -eq 'RemoteScriptFailed' -and $item.OutputTail) {
-            Write-Log -Level WARN -Message "[$computerName] Last lines of remote output:`n$($item.OutputTail)"
-        }
-
-        # Clean up the device's temp folder once its ZIP is safely retrieved.
-        if ($DeliveryMode -eq 'Copy' -and -not $KeepRemoteTempFolder -and $item.WorkFolder) {
-            try {
-                Invoke-Command -Session $sessionsByName[$computerName] -ErrorAction Stop -ArgumentList $item.WorkFolder -ScriptBlock {
-                    param($Folder)
-                    Remove-Item -LiteralPath $Folder -Recurse -Force -ErrorAction SilentlyContinue
+                catch {
+                    Write-Log -Level WARN -Message "[$computerName] Ran successfully but its Manifest.json could not be parsed for summary metrics: $($_.Exception.Message)"
                 }
             }
-            catch {
-                Write-Log -Level WARN -Message "[$computerName] Could not remove the temp folder '$($item.WorkFolder)': $($_.Exception.Message)"
+
+            # ------------------------------------------------------------------
+            # Copy mode evidence retrieval: pull the ZIP back over the session
+            # that is already authenticated, then let THIS machine write it to
+            # $collectionFolder as your account. This is the second half of
+            # avoiding the double-hop - the device never writes to the share.
+            # ------------------------------------------------------------------
+            # A device can return its result and then drop before its evidence
+            # is pulled back, so the session is re-checked here rather than
+            # assumed still good from when the batch started. Checking gives a
+            # message that says what happened; not checking gave a confusing
+            # transport-level error against a session that no longer existed.
+            $deviceSession = $sessionsByName[$computerName]
+            $deviceSessionState = [string](Get-OptionalProperty -InputObject $deviceSession -Name 'State' -Default 'Unknown')
+            $deviceSessionUsable = ($null -ne $deviceSession -and $deviceSessionState -eq 'Opened')
+
+            if ($DeliveryMode -eq 'Copy' -and $itemZipPath -and -not $deviceSessionUsable) {
+                Write-Log -Level WARN -Message "[$computerName] The remote run finished, but its session was $deviceSessionState before the evidence ZIP could be retrieved - the device most likely went offline mid-run. Its evidence is still at '$itemZipPath' on the device; re-run this device or collect that file manually."
+                $row.Detail = "$($row.Detail) Evidence not retrieved: the session was $deviceSessionState (device went offline mid-run). The ZIP remains on the device at '$itemZipPath'."
+            }
+            elseif ($DeliveryMode -eq 'Copy' -and $itemZipPath) {
+                try {
+                    if (-not (Test-Path -LiteralPath $collectionFolder)) {
+                        New-Item -ItemType Directory -Path $collectionFolder -Force -ErrorAction Stop | Out-Null
+                    }
+                    # The remote ZIP is already named "<Computer>-<timestamp>.zip"
+                    # by Test-MDMWinsOverGP.ps1, so it cannot collide with
+                    # another device's.
+                    Copy-Item -FromSession $sessionsByName[$computerName] -LiteralPath $itemZipPath `
+                        -Destination $collectionFolder -Force -ErrorAction Stop
+                    $row.CollectedZip = Join-Path $collectionFolder (Split-Path -Path $itemZipPath -Leaf)
+                    Write-Log -Message "[$computerName] Evidence collected to '$($row.CollectedZip)'."
+                }
+                catch {
+                    Write-Log -Level WARN -Message "[$computerName] Ran successfully but its evidence ZIP could not be retrieved to '$collectionFolder': $($_.Exception.Message)"
+                    $row.Detail = "$($row.Detail) Evidence retrieval failed: $($_.Exception.Message)"
+                }
+            }
+
+            # Surface the tail of the remote console output when something went
+            # wrong, so a failure is diagnosable without logging on to the device.
+            if ($row.Outcome -eq 'RemoteScriptFailed' -and $itemOutputTail) {
+                Write-Log -Level WARN -Message "[$computerName] Last lines of remote output:`n$itemOutputTail"
+            }
+
+            # Clean up the device's temp folder once its ZIP is safely
+            # retrieved. Skipped outright on a dead session - there is nothing
+            # to clean up over, and the leftover folder is harmless (and is
+            # what -KeepRemoteTempFolder would have left anyway).
+            if ($DeliveryMode -eq 'Copy' -and -not $KeepRemoteTempFolder -and $itemWorkFolder -and -not $deviceSessionUsable) {
+                Write-Log -Level WARN -Message "[$computerName] Could not remove the temp folder '$itemWorkFolder': the session was $deviceSessionState. Remove it manually if the device comes back online."
+            }
+            elseif ($DeliveryMode -eq 'Copy' -and -not $KeepRemoteTempFolder -and $itemWorkFolder) {
+                try {
+                    Invoke-Command -Session $sessionsByName[$computerName] -ErrorAction Stop -ArgumentList $itemWorkFolder -ScriptBlock {
+                        param($Folder)
+                        Remove-Item -LiteralPath $Folder -Recurse -Force -ErrorAction SilentlyContinue
+                    }
+                }
+                catch {
+                    Write-Log -Level WARN -Message "[$computerName] Could not remove the temp folder '$itemWorkFolder': $($_.Exception.Message)"
+                }
+            }
+        }
+        catch {
+            # One device must never cost the rest of its batch their rows in
+            # FleetSummary.csv. Record the failure against that device and
+            # keep processing the others.
+            #
+            # $computerName is initialised before the try (rather than relying
+            # on the assignment inside it) because under Set-StrictMode this
+            # handler would itself throw on an unassigned variable if the
+            # failure happened on the very first statement.
+            $label = if ([string]::IsNullOrWhiteSpace($computerName)) { 'unknown device' } else { $computerName }
+            Write-Log -Level WARN -Message "[$label] Failed while processing this device's result: $($_.Exception.Message)"
+
+            if (-not [string]::IsNullOrWhiteSpace($computerName) -and $results.ContainsKey($computerName)) {
+                $results[$computerName].Outcome = 'RemoteScriptFailed'
+                $results[$computerName].Detail = "Failed while processing this device's result: $($_.Exception.Message)"
             }
         }
     }
 
-    # Any connected device that never returned a result: timed out, or the
-    # session died mid-run.
-    foreach ($session in $sessions) {
+    # Any connected device that never returned a result: timed out, dropped
+    # off the network mid-run, or failed some other way.
+    #
+    # A device that was reachable at the start and goes offline part-way
+    # through is an expected event on a fleet of this size - laptops sleep,
+    # users undock, VPNs drop - not an error condition for the run. It is
+    # classified as its own outcome so the summary distinguishes "this device
+    # disappeared" from "this device's script failed", and so it is obvious
+    # which devices simply need re-running.
+    foreach ($session in $Sessions) {
         $name = $session.ComputerName
         $row = $results[$name]
         if ($row.FinishedAt) { continue }
 
-        if (-not $completed -and $childJobsByComputer.ContainsKey($name) -and $childJobsByComputer[$name].State -eq 'Running') {
+        $childState = if ($childJobsByComputer.ContainsKey($name)) {
+            [string]$childJobsByComputer[$name].State
+        } else { 'Unknown' }
+
+        $sessionState = [string](Get-OptionalProperty -InputObject $session -Name 'State' -Default 'Unknown')
+
+        if (-not $completed -and $childState -eq 'Running') {
             $row.Outcome = 'TimedOut'
             $row.Detail = "The remote run had not finished after $RemoteTimeoutSeconds second(s). It continues on the device; re-run with a higher -RemoteTimeoutSeconds or collect its evidence manually."
         }
+        elseif ($sessionState -ne 'Opened') {
+            $row.Outcome = 'DisconnectedMidRun'
+            $row.Detail = "The device was reachable when the run started but its session was $sessionState by the time results were collected (job state: $childState). It most likely went offline, slept, or lost network part-way through. Any evidence it produced is still on the device; re-run this device to collect it."
+        }
         else {
-            $childState = if ($childJobsByComputer.ContainsKey($name)) { $childJobsByComputer[$name].State } else { 'Unknown' }
             $row.Outcome = 'RemoteScriptFailed'
-            $row.Detail = "No result was returned for this device (job state: $childState)."
+            $row.Detail = "No result was returned for this device (job state: $childState, session state: $sessionState)."
         }
         Write-Log -Level WARN -Message "[$name] $($row.Detail)"
     }
@@ -834,8 +1021,103 @@ if ($sessions.Count -gt 0) {
     Remove-Job -Job $icmJob -Force -ErrorAction SilentlyContinue
 }
 
-if ($sessions.Count -gt 0) {
-    Remove-PSSession -Session $sessions -ErrorAction SilentlyContinue
+# ---------------------------------------------------------------------------
+# Batch dispatch loop.
+#
+# Each batch opens its own sessions, runs to completion, retrieves evidence,
+# and closes those sessions before the next batch starts - so at most
+# -ThrottleLimit devices are ever connected and running at the same time.
+#
+# -RemoteTimeoutSeconds applies per batch, which is the intended reading:
+# it is the ceiling on how long any one device's run may take, not a budget
+# for the whole fleet.
+#
+# The whole loop is wrapped so that a failure part-way through still leaves a
+# FleetSummary.csv describing everything processed so far. Losing the summary
+# for 100+ devices because device 63 returned something unexpected is a far
+# worse outcome than the original error.
+# ---------------------------------------------------------------------------
+$deviceBatches = @(Split-IntoBatches -Items $onlineDevices -BatchSize $ThrottleLimit)
+
+if ($deviceBatches.Count -gt 0) {
+    Write-Log -Message "Processing $($onlineDevices.Count) online device(s) in $($deviceBatches.Count) batch(es) of up to $ThrottleLimit concurrent device(s)."
+}
+
+$fleetError = $null
+
+try {
+    $batchNumber = 0
+
+    foreach ($batch in $deviceBatches) {
+        $batchNumber++
+        $batchSessions = @()
+
+        try {
+            # ---------------------------------------------------------------
+            # Establish sessions for this batch only. Explicit PSSessions
+            # (rather than Invoke-Command -ComputerName) because Copy mode
+            # needs a session object to pull each evidence ZIP back with
+            # Copy-Item -FromSession.
+            # ---------------------------------------------------------------
+            Write-Log -Message "Batch $batchNumber of $($deviceBatches.Count): opening remote sessions to $($batch.Count) device(s)..."
+
+            $sessionErrors = $null
+            $sessionParams = @{
+                ComputerName  = $batch
+                ThrottleLimit = $ThrottleLimit
+                ErrorVariable = 'sessionErrors'
+                ErrorAction   = 'SilentlyContinue'
+            }
+            if ($Credential) { $sessionParams['Credential'] = $Credential }
+
+            $batchSessions = @(New-PSSession @sessionParams)
+
+            if ($sessionErrors) {
+                foreach ($errRecord in $sessionErrors) {
+                    Write-Log -Level WARN -Message "Session error: $($errRecord.Exception.Message)"
+                }
+            }
+
+            $connectedNames = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($session in $batchSessions) { [void]$connectedNames.Add($session.ComputerName) }
+
+            foreach ($name in $batch) {
+                if (-not $connectedNames.Contains($name)) {
+                    $results[$name].Outcome = 'ConnectionFailed'
+                    $results[$name].Detail = 'Responded to ping, but a PowerShell remoting session could not be established. Common causes: WinRM is not enabled/reachable (Enable-PSRemoting), a firewall is blocking 5985/5986, or authentication failed.'
+                    Write-Log -Level WARN -Message "Could not open a session to '$name'."
+                }
+            }
+
+            Write-Log -Message "Batch $batchNumber`: $($batchSessions.Count) session(s) established."
+
+            if ($batchSessions.Count -gt 0) {
+                Invoke-FleetBatch -Sessions $batchSessions
+            }
+        }
+        catch {
+            # A batch-level failure must not take the remaining batches with
+            # it. Mark this batch's unfinished devices and carry on.
+            Write-Log -Level WARN -Message "Batch $batchNumber failed: $($_.Exception.Message)"
+            foreach ($name in $batch) {
+                if ($results.ContainsKey($name) -and -not $results[$name].FinishedAt -and
+                    $results[$name].Outcome -ne 'ConnectionFailed') {
+                    $results[$name].Outcome = 'RemoteScriptFailed'
+                    $results[$name].Detail = "The batch this device was in failed: $($_.Exception.Message)"
+                }
+            }
+        }
+        finally {
+            if ($batchSessions.Count -gt 0) {
+                Remove-PSSession -Session $batchSessions -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
+catch {
+    # Recorded and re-surfaced after the summary is written, below.
+    $fleetError = $_
+    Write-Log -Level ERROR -Message "Fleet run failed: $($_.Exception.Message)"
 }
 
 # ---------------------------------------------------------------------------
@@ -844,6 +1126,12 @@ if ($sessions.Count -gt 0) {
 $summaryRows = @($deviceNames | ForEach-Object { $results[$_] })
 $summaryRows | Export-Csv -LiteralPath $SummaryOutputPath -NoTypeInformation -Encoding UTF8
 
+if ($fleetError) {
+    Write-Log -Level ERROR -Message "The summary above covers everything processed before the failure. Original error: $($fleetError.Exception.Message)"
+    Write-Log -Level ERROR -Message "At: $($fleetError.InvocationInfo.PositionMessage)"
+    exit 1
+}
+
 $outcomeCounts = $summaryRows | Group-Object -Property Outcome | ForEach-Object { "$($_.Name)=$($_.Count)" }
 Write-Log -Message "Fleet run complete. $($outcomeCounts -join ', ')."
 if ($DeliveryMode -eq 'Copy') {
@@ -851,7 +1139,7 @@ if ($DeliveryMode -eq 'Copy') {
 }
 Write-Log -Message "Summary written to '$SummaryOutputPath'."
 
-$failureOutcomes = @('RemoteScriptFailed', 'ConnectionFailed', 'TimedOut')
+$failureOutcomes = @('RemoteScriptFailed', 'ConnectionFailed', 'TimedOut', 'DisconnectedMidRun')
 $anyFailures = @($summaryRows | Where-Object { $failureOutcomes -contains $_.Outcome }).Count -gt 0
 $anyConflicts = @($summaryRows | Where-Object { @('ConflictsFound', 'DegradedEvidence') -contains $_.Outcome }).Count -gt 0
 
