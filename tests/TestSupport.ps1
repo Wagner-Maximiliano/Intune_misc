@@ -17,8 +17,11 @@ silently drifted from the originals.
 
 So this file provides only three kinds of thing:
 
-  1. A loader that pulls the REAL function text out of a production .ps1 and
-     defines it in the caller's scope (Import-ProductionFunction).
+  1. Two ways to reach real production code: a loader that pulls the REAL
+     function text out of a production .ps1 and defines it in the caller's
+     scope (Import-ProductionFunction), and, for logic that has already moved
+     into modules/ under Issue #15, an ordinary module import
+     (Import-ContinuumModule). Neither copies anything.
   2. An offline fake for Microsoft Graph, so a whole script can be run
      end to end with no tenant (Enable-FakeGraph and friends).
   3. Fixture builders and temp-folder plumbing.
@@ -34,8 +37,10 @@ functions would also run that main body. Parsing the file and re-declaring
 just its function definitions gives the real, byte-identical function bodies
 with none of the side effects, and needs no test hook in production code.
 
-When Issue #15 moves this logic into Continuum.* modules, Import-ProductionFunction
-is replaced by Import-Module and the tests themselves should not need to change.
+Issue #15 has started doing exactly that. Seven helpers now live in
+modules/Continuum.Core and are loaded with Import-ContinuumModule instead; the
+tests that used them needed only their loader line changed, which is what that
+prediction was about. The AST loader stays for everything still in scripts/.
 
 NOTE ON StrictMode: this file deliberately does NOT set it. The five scripts
 in scripts/ run with no StrictMode at all (docs/REVIEW-PHASE0.md R-01), and a
@@ -72,6 +77,39 @@ function Get-ToolkitScriptPath {
         throw "Toolkit script not found: '$path'. Has it been renamed or moved out of MDMWinsOverGPToolKit/?"
     }
     return $path
+}
+
+function Get-ContinuumModulePath {
+    <# Absolute path to a module manifest under modules/, throwing if it has moved. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Name)
+
+    $repoRoot = Split-Path -Parent $PSScriptRoot
+    $path     = Join-Path (Join-Path (Join-Path $repoRoot 'modules') $Name) "$Name.psd1"
+    if (-not (Test-Path -LiteralPath $path)) {
+        throw "Module manifest not found: '$path'. Has it been renamed or moved out of modules/?"
+    }
+    return $path
+}
+
+function Import-ContinuumModule {
+    <#
+        Imports a Continuum module the way production does, for tests of code
+        that has finished moving out of scripts/ (Issue #15).
+
+        This is the replacement TestSupport.ps1's header has always pointed at:
+        where Import-ProductionFunction copies a function's source out of a
+        .ps1, this loads the real shipped module. Prefer it for anything that
+        now lives in modules/ - the AST loader cannot see module code, and a
+        test that reached for it would be testing nothing.
+
+        -Force so an edit to the module is picked up within a session rather
+        than being masked by an already-loaded copy.
+    #>
+    [CmdletBinding()]
+    param([string]$Name = 'Continuum.Core')
+
+    Import-Module (Get-ContinuumModulePath -Name $Name) -Force -ErrorAction Stop
 }
 
 function Get-ScriptFunctionDefinition {

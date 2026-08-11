@@ -40,21 +40,24 @@ BeforeAll {
 
     $script:BackupScript = Get-ProductionScriptPath -Name 'Backup-IntunePolicies.ps1'
 
+    # Still defined in the script: loaded verbatim from its AST.
     . (Import-ProductionFunction -Path $script:BackupScript -Name @(
             'Add-SettingDefinitionToCache'
             'Get-SettingDefinition'
             'Resolve-SettingTitle'
             'Resolve-ChoiceValue'
             'ConvertTo-FlatSettings'
-            'Get-StringSha256'
-            'Get-PolicyContentHash'
-            'Get-SafeFileName'
             'Get-VersionSheetName'
-            'Format-AssignmentList'
             'Get-GroupDisplayName'
             'Get-AssignmentFilterName'
             'Resolve-Assignment'
         ))
+
+    # Moved to modules/Continuum.Core by Issue #15 (D-018): Get-StringSha256,
+    # Get-PolicyContentHash, Get-SafeFileName and Format-AssignmentList. The
+    # assertions below are unchanged - the script still calls exactly these
+    # functions, they just ship from the module now.
+    Import-ContinuumModule
 
     # Plain ConvertFrom-Json (PSCustomObject, not -AsHashtable) so the suite
     # runs on Windows PowerShell 5.1 as well as 7.
@@ -266,6 +269,44 @@ Describe 'Get-PolicyContentHash' {
         $script:Assign = @([pscustomobject]@{
                 AssignmentType = 'groupAssignmentTarget'; GroupId = 'g1'; FilterId = $null; FilterType = 'none'
             })
+    }
+
+    # --- Stored-identity guard, added with the Continuum.Core extraction -----
+    # Every other test in this Describe is RELATIVE: it compares one hash to
+    # another. That means a change to the canonical string itself - reordering
+    # the parts, renaming the ##ASSIGNMENTS## separator, changing the
+    # separators - moves both sides equally and stays green. Verified: with the
+    # rest of this file as it stands, editing the separator in Continuum.Core
+    # broke nothing.
+    #
+    # That gap matters more than it looks. This hash is a STORED IDENTITY: it
+    # is written to the history database and compared across runs and across
+    # tools, so any change to it silently re-versions every affected policy on
+    # the next ingest - the exact cost that keeps R-15 open and unfixed
+    # (docs/REVIEW-PHASE0.md R-15, docs/DECISIONS.md D-011).
+    #
+    # These literals were computed from the pre-extraction copy in
+    # Backup-IntunePolicies.ps1 at commit HEAD, so they pin the shipped
+    # behaviour, not the refactor's. If one of them fails, do not update the
+    # literal until you are certain the change is intended and the user has
+    # accepted the re-ingest.
+
+    It 'produces the exact stored hash for an empty policy' {
+        Get-PolicyContentHash -FlatSettings $null -Assignments @() |
+            Should -Be '9b54ff1edc6537f1358f59b831797f6c312e32528aeb8c95dc956c7f78f89b4f'
+    }
+
+    It 'produces the exact stored hash for one setting' {
+        Get-PolicyContentHash -FlatSettings @([pscustomobject]@{ Path = 'def_a'; RawValue = '1' }) -Assignments @() |
+            Should -Be '5f472463eb332f4940061595d7ea8d90a6dd15eb01255b54474f7f60067fa645'
+    }
+
+    It 'produces the exact stored hash for one setting and one assignment' {
+        $assignment = @([pscustomobject]@{
+                AssignmentType = 'groupAssignmentTarget'; GroupId = 'g1'; FilterId = 'f1'; FilterType = 'include'
+            })
+        Get-PolicyContentHash -FlatSettings @([pscustomobject]@{ Path = 'def_a'; RawValue = '1' }) -Assignments $assignment |
+            Should -Be '9e22049bbca2f62c9209b8a6d3a258d472d5973b65f207a0f1830970eb055d9b'
     }
 
     It 'is stable for identical input' {

@@ -90,12 +90,16 @@ tests/*.Tests.ps1
                             and inspects the files it wrote
 ```
 
-**Both halves are scaffolding for the current shape.** Once the module
-extraction lands, `Import-ProductionFunction` becomes `Import-Module
-Continuum.PolicyBackup` and the whole-script tests become thin CLI-wrapper
-tests over the same module functions. Note the loader's limit before relying on
-it during the extraction: an AST-loaded function has no backing file, so
-`$PSScriptRoot` is empty inside it.
+**Both halves are scaffolding for the current shape, and the first half has
+started coming down.** Issue #15's first slice moved seven helpers into
+`modules/Continuum.Core` (D-018), and the tests for them now call
+`Import-ContinuumModule` — an ordinary `Import-Module` — instead of the AST
+loader. Only their loader line changed, which is what this section predicted.
+The AST loader stays for everything still in `scripts/`. Note its limit before
+relying on it for the rest of the extraction: an AST-loaded function has no
+backing file, so `$PSScriptRoot` is empty inside it — and the scripts now use
+`$PSScriptRoot` to find the module, so anything path-dependent must be tested
+through the whole-script route.
 
 ---
 
@@ -136,6 +140,25 @@ from drifting apart — the CLI must keep working, since it's how the tools get
 deployed to devices and run under Intune/SCCM/RMM.
 
 ### Module split
+
+**Status: `Continuum.Core` exists** at `modules/Continuum.Core`, holding the
+first seven functions (D-018). The table below is still the target; what is in
+the module today is a subset of the `Core` row.
+
+```
+modules/
+  Continuum.Core/
+    Continuum.Core.psd1    manifest - no RequiredModules, so the offline
+                           paths and the Pester suite can import it with
+                           nothing installed
+    Continuum.Core.psm1    Write-TextFile, ConvertFrom-JsonFile,
+                           Get-MgGraphAllPages, Get-SafeFileName,
+                           Get-StringSha256, Get-PolicyContentHash,
+                           Format-AssignmentList
+```
+
+Each script in `scripts/` locates it relative to `$PSScriptRoot` and imports it
+near the top, so `scripts/` and `modules/` must stay siblings.
 
 | Module | Holds |
 |---|---|

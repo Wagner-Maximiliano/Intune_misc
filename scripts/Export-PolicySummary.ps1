@@ -8,7 +8,9 @@ Get-IntuneSettingsCatalogSnapshot.ps1 and builds ONE Excel workbook, with ONE
 ROW per policy, for a quick at-a-glance review: name, created, last modified,
 which groups/filters it's assigned to, and which it's excluded from.
 
-This is a single, self-contained file - nothing to dot-source. It does NOT
+This script depends on ONE file in this repository: modules/Continuum.Core,
+which must stay a sibling of scripts/ and is imported automatically (Issue #15,
+docs/DECISIONS.md D-018). There is still nothing to dot-source. It does NOT
 connect to Graph at all; it only reads JSON files already on disk (group and
 filter names are already resolved inside those JSON files).
 
@@ -40,23 +42,22 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-function Format-AssignmentGroup {
-    <# Same rendering as the per-policy workbook header: "Group [filter: Name/Type], ...". #>
-    param($Assignments, [switch]$Exclude)
-
-    $items = @($Assignments) | Where-Object { $_.IsExclude -eq [bool]$Exclude -and $_.GroupId }
-    if (-not $items) {
-        if (-not $Exclude) {
-            $special = @($Assignments) | Where-Object { -not $_.GroupId -and -not $_.IsExclude } | ForEach-Object { $_.AssignmentType }
-            if ($special) { return ($special -join ', ') }
-        }
-        return ''
-    }
-
-    return (($items | ForEach-Object {
-        if ($_.FilterName) { "$($_.GroupName) [filter: $($_.FilterName)/$($_.FilterType)]" } else { $_.GroupName }
-    }) -join ', ')
+# ----------------------------------------------------------------------------
+# Shared module
+# ----------------------------------------------------------------------------
+# This file used to define Format-AssignmentGroup - the same body as
+# Backup-IntunePolicies.ps1's and Restore-IntunePolicy.ps1's
+# Format-AssignmentList, under a different name, which is why a parity test was
+# needed to notice if the three drifted. All three are now one function in
+# modules/Continuum.Core (Issue #15, D-018). $PSScriptRoot is used here only to
+# locate a repository file - no output path changed (known issue #7).
+$ContinuumCorePath = if ($PSScriptRoot) {
+    Join-Path (Join-Path (Join-Path (Split-Path -Parent $PSScriptRoot) 'modules') 'Continuum.Core') 'Continuum.Core.psd1'
 }
+if (-not $ContinuumCorePath -or -not (Test-Path -LiteralPath $ContinuumCorePath)) {
+    throw "Continuum.Core was not found (looked for '$ContinuumCorePath'). scripts/ and modules/ must stay siblings in the repository - see docs/DECISIONS.md D-018."
+}
+Import-Module $ContinuumCorePath -Force -ErrorAction Stop
 
 if (-not (Test-Path $JsonPath)) {
     throw "Path not found: $JsonPath"
@@ -106,8 +107,8 @@ $rows = foreach ($entry in $latestById.Values) {
         'Policy Name'   = $s.Name
         'Created'       = $s.CreatedDateTime
         'Last Modified' = $s.LastModifiedDateTime
-        'Assigned To'   = Format-AssignmentGroup -Assignments $s.Assignments
-        'Excluded From' = Format-AssignmentGroup -Assignments $s.Assignments -Exclude
+        'Assigned To'   = Format-AssignmentList -Assignments $s.Assignments
+        'Excluded From' = Format-AssignmentList -Assignments $s.Assignments -Exclude
         'Policy Id'     = $s.Id
     }
 }

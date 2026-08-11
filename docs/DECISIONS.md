@@ -494,6 +494,91 @@ drift silently, exactly the failure mode D-012 exists to prevent.
 
 ---
 
+## D-018 — `Continuum.Core` starts with the self-contained duplicates only; the cache-dependent family stays in `scripts/` until its ownership is designed
+
+**Date**: 2026-08-11 · **Context**: Issue #15, first slice
+
+**Decision.** `modules/Continuum.Core` now holds seven functions, moved
+verbatim out of `scripts/`: `Write-TextFile`, `ConvertFrom-JsonFile`,
+`Get-MgGraphAllPages`, `Get-SafeFileName`, `Get-StringSha256`,
+`Get-PolicyContentHash` and `Format-AssignmentList`. All five scripts import it
+by path relative to `$PSScriptRoot`. Seventeen duplicate definitions became
+seven.
+
+Eight further duplicates — `Add-SettingDefinitionToCache`,
+`Get-SettingDefinition`, `Resolve-SettingTitle`, `Resolve-ChoiceValue`,
+`ConvertTo-FlatSettings`, `Get-GroupDisplayName`, `Get-AssignmentFilterName`,
+`Resolve-Assignment` — **deliberately stayed put**, and the parity tests that
+watch them stayed too.
+
+**Why this split and not "move everything".** The two groups fail differently:
+
+- The seven are *self-contained*: they read no script-level state and call
+  nothing that differs between their former homes. Moving them is a pure
+  relocation, which is checkable.
+- The eight are not. They read `$DefinitionCache` / `$GroupNameCache` /
+  `$FilterNameCache`, which their scripts declare at **file scope** — and a
+  module function cannot see its caller's script scope, so moving them
+  silently changes what they read. Worse, `Get-SettingDefinition` is **not the
+  same function** in both scripts on purpose: the backup fetches from Graph,
+  the database import is offline by design and always returns `$null`.
+  Collapsing them needs an injected resolver plus an owner for the caches —
+  a design decision, not a mechanical edit. Doing it in the same change as a
+  verbatim move would have made a green suite meaningless, because nobody
+  could tell which half a failure came from.
+
+**Verbatim really means verbatim.** No body was tidied on the way in, including
+the `[AllowNull()]` / `[AllowEmptyCollection()]` decorations that are
+load-bearing (R-03, R-13). A behaviour-preserving move is only checkable if it
+is actually a move. `Get-PolicyContentHash`'s output was diffed against the
+pre-change copy at `HEAD` across five inputs, including the legacy R-15 shape —
+all identical, so **no stored hash moves and R-15 is untouched and still the
+user's call.**
+
+**Two guards were added to make the extraction stick**, both verified to fail
+when violated:
+
+1. No script may define a function a module exports. A re-added "local copy"
+   would **shadow** the module's silently and drift exactly as the originals
+   did, with the suite still green because it tests the module.
+2. A script calling a module function must contain a real `Import-Module`
+   statement. The first version of this guard searched for the string
+   `Continuum.Core` and **passed on a deliberately broken script**, because the
+   path variable and comments still contained the name.
+
+**Costs, accepted.**
+
+- **The scripts are no longer standalone files.** Each header said "a single,
+  self-contained file... no other file it depends on"; that is now false and
+  every header was corrected. Copying one `.ps1` out of the repository stops
+  working — they need `scripts/` and `modules/` together. This is the point of
+  #15 and ARCHITECTURE's "no logic lives only in a script", but it is a real
+  behaviour change for anyone who copied a single file around.
+- **First use of `$PSScriptRoot` in `scripts/`**, to locate the module. Known
+  issue #7 (no path portability for *output* paths) is untouched.
+
+**Rejected.**
+- *Move all fifteen duplicates at once.* One commit, done. Rejected because of
+  the scope collision above: it silently changes what the cache-reading
+  functions see, and bundles a design decision into a mechanical move.
+- *Move `ConvertTo-FlatSettings` too, injecting the resolver now.* It is the
+  most valuable one to unify and it has drift tests already. Rejected as a
+  design decision that deserves its own change and its own test run — but it
+  is the obvious next slice.
+- *Keep `Export-PolicySummary.ps1`'s `Format-AssignmentGroup` as a separate
+  name.* It was the same body under a different name, which is why a parity
+  test existed at all. It now calls the shared function; the parity tests were
+  deleted rather than left asserting that a function equals itself, as
+  PROJECT_STATUS called for.
+- *Dot-source a shared `.ps1` instead of a real module.* Less machinery, and it
+  would dodge the module-scope problem entirely — a dot-sourced function sees
+  the caller's script scope, so all fifteen could have moved at once. Rejected
+  because it recreates the coupling #15 exists to remove: the console must call
+  these functions too (D-002), and `Import-Module` is what lets it. It also
+  keeps `tests/`'s eventual `Import-Module` route honest (D-012).
+
+---
+
 ## D-017 — Keep the `Where-Object { $_ }` assignment guard, and give it a real test, rather than deleting it as dead code
 
 **Date**: 2026-07-30 · **Context**: closing Issue #14

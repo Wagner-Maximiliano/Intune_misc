@@ -27,8 +27,12 @@ assignments, NOT display names). Re-running never duplicates a version: an
 unchanged policy is skipped, a new state is appended. So you can point this at
 the whole json/ tree repeatedly and it just keeps the history complete.
 
-This is a single, self-contained file. There is nothing else to dot-source
-and no other file it depends on. It does NOT connect to Microsoft Graph at
+This script depends on ONE file in this repository: modules/Continuum.Core,
+which must stay a sibling of scripts/. It holds the helpers this file used to
+carry its own copy of (Issue #15, docs/DECISIONS.md D-018). Copying this .ps1
+somewhere on its own no longer works - take the repository, or at least
+scripts/ and modules/ together. It is imported automatically; there is still
+nothing to dot-source. It does NOT connect to Microsoft Graph at
 all - it only reads JSON already on disk (group/filter names are already
 resolved inside the JSON; setting titles are resolved from the cached
 definitions file when available, raw ids otherwise).
@@ -70,16 +74,25 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # ----------------------------------------------------------------------------
+# Shared module
+# ----------------------------------------------------------------------------
+# ConvertFrom-JsonFile, Get-StringSha256 and Get-PolicyContentHash
+# used to be defined in this file, and again in the other scripts. They now
+# live in modules/Continuum.Core (Issue #15, D-018). $PSScriptRoot is used here
+# only to locate a repository file - no output path changed (known issue #7).
+$ContinuumCorePath = if ($PSScriptRoot) {
+    Join-Path (Join-Path (Join-Path (Split-Path -Parent $PSScriptRoot) 'modules') 'Continuum.Core') 'Continuum.Core.psd1'
+}
+if (-not $ContinuumCorePath -or -not (Test-Path -LiteralPath $ContinuumCorePath)) {
+    throw "Continuum.Core was not found (looked for '$ContinuumCorePath'). scripts/ and modules/ must stay siblings in the repository - see docs/DECISIONS.md D-018."
+}
+Import-Module $ContinuumCorePath -Force -ErrorAction Stop
+
+# ----------------------------------------------------------------------------
 # File I/O helpers (BOM-free read, matching the rest of the project)
 # ----------------------------------------------------------------------------
 
-function ConvertFrom-JsonFile {
-    param([Parameter(Mandatory)][string]$Path)
-    $raw = Get-Content -Path $Path -Raw
-    if ($raw) { $raw = $raw.TrimStart([char]0xFEFF) }   # strip UTF-8 BOM if present
-    if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
-    return ($raw | ConvertFrom-Json)
-}
+# ConvertFrom-JsonFile: see Continuum.Core.
 
 function ConvertTo-DateTimeOrMin {
     <# Parse an ISO-8601 'o' timestamp to [datetime]; MinValue on failure so
@@ -230,29 +243,9 @@ function ConvertTo-FlatSettings {
 # imported here has the same identity as the backup that produced it)
 # ----------------------------------------------------------------------------
 
-function Get-StringSha256 {
-    param([Parameter(Mandatory)][string]$Text)
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
-        return ([System.BitConverter]::ToString($sha.ComputeHash($bytes)) -replace '-', '').ToLowerInvariant()
-    }
-    finally { $sha.Dispose() }
-}
-
-function Get-PolicyContentHash {
-    # AllowNull/AllowEmptyCollection, kept in step with Backup-IntunePolicies.ps1's
-    # copy: ConvertTo-FlatSettings returns a List[object] and PowerShell
-    # enumerates an IEnumerable on output, so a snapshot with no settings makes
-    # the caller's $flat $null - which a bare Mandatory parameter rejects at
-    # bind time. That aborted the ingest of exactly the files R-03 was supposed
-    # to have unblocked (docs/REVIEW-PHASE0.md R-13).
-    param([Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()]$FlatSettings, $Assignments)
-    $settingLines = @($FlatSettings | ForEach-Object { "$($_.Path)=$($_.RawValue)" } | Sort-Object)
-    $assignLines  = @(@($Assignments) | ForEach-Object { "$($_.AssignmentType)|$($_.GroupId)|$($_.FilterId)|$($_.FilterType)" } | Sort-Object)
-    $canonical = ($settingLines -join "`n") + "`n##ASSIGNMENTS##`n" + ($assignLines -join "`n")
-    return Get-StringSha256 -Text $canonical
-}
+# Get-StringSha256 and Get-PolicyContentHash: see Continuum.Core - the same
+# function the backup script calls, which is what makes a policy's identity
+# agree across the two tools. R-15 remains open and is the user's call (D-011).
 
 # ----------------------------------------------------------------------------
 # SQLite helpers (require the PSSQLite module - see header comment)

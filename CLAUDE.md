@@ -25,11 +25,15 @@ Quick map:
 
 ## Hard rules
 
-1. **Check whether you can run PowerShell before assuming you can't.** This
-   used to read "you cannot" flatly; on 2026-07-30 a session ran the suite
-   natively (Windows PowerShell 5.1, Pester 6.0.1) and that single fact
-   overturned a HIGH review finding four sessions of desk-checking had got
-   wrong (R-02). **Try it first.** If there is no interpreter, desk-check and
+1. **Check whether you can run PowerShell before assuming you can't — and if
+   there is none, try to install one.** This used to read "you cannot" flatly;
+   on 2026-07-30 a session ran the suite natively (Windows PowerShell 5.1,
+   Pester 6.0.1) and that single fact overturned a HIGH review finding four
+   sessions of desk-checking had got wrong (R-02). On 2026-08-11 a Linux
+   sandbox with no `pwsh` got one in two minutes: the PowerShell 7 tarball from
+   `github.com` releases, and Pester from `api.nuget.org` (`powershellgallery.com`
+   is blocked) — recipe in `docs/AGENT_ONBOARDING.md` §2. **Try it first.** If
+   there is genuinely no interpreter, desk-check and
    **say explicitly in your final message that it is unverified** — never imply
    you tested something you didn't. Target devices and a tenant are a separate
    question; those are still the user's to provide.

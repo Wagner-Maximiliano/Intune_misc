@@ -24,16 +24,26 @@ copies. The copies drifted. Four real bugs — `docs/REVIEW-PHASE0.md` R-02
 through R-05 — shipped to a live tenant behind a green test run, because the
 suite never executed the code containing them.
 
-So there are exactly two legitimate ways to reach production logic from here:
+So there are exactly three legitimate ways to reach production logic from here:
 
 | What you want | How |
 |---|---|
-| One function, in isolation | `. (Import-ProductionFunction -Path <script> -Name <fn>)` — copies the function's source verbatim out of the file's AST |
+| A function that has moved into `modules/` | `Import-ContinuumModule` — an ordinary `Import-Module` of the shipped module (Issue #15) |
+| One function still in a script | `. (Import-ProductionFunction -Path <script> -Name <fn>)` — copies the function's source verbatim out of the file's AST |
 | A whole script's behaviour | `Enable-FakeGraph`, then `& $script -OutputPath $tmp ...`, then inspect what it wrote |
 
+Reach for the module route first, and check where a function actually lives
+before writing the loader line: the AST loader cannot see module code, so a
+test that asks it for `Get-PolicyContentHash` now throws rather than silently
+testing nothing.
+
 `SuiteIntegrity.Tests.ps1` enforces this mechanically: it fails if any file
-under `tests/` defines a function name that also exists in `scripts/` or
-`MDMWinsOverGPToolKit/`, including names hidden inside a `BeforeAll` block.
+under `tests/` defines a function name that also exists in `scripts/`,
+`modules/` or `MDMWinsOverGPToolKit/`, including names hidden inside a
+`BeforeAll` block. Two further guards protect the extraction itself — no
+script may define a function a module exports (it would silently **shadow**
+the module's copy), and a script calling a module function must contain a real
+`Import-Module` statement.
 
 ---
 
@@ -41,13 +51,13 @@ under `tests/` defines a function name that also exists in `scripts/` or
 
 | File | What it covers |
 |---|---|
-| `TestSupport.ps1` | Infrastructure only: the AST loader, the Graph fake, fixture builders, temp folders |
+| `TestSupport.ps1` | Infrastructure only: the module importer, the AST loader, the Graph fake, fixture builders, temp folders |
 | `Backup.Functions.Tests.ps1` | `Backup-IntunePolicies.ps1`, function by function |
 | `Backup.Script.Tests.ps1` | `Backup-IntunePolicies.ps1` run end to end against the fake tenant |
 | `SettingsCatalogSnapshot.Script.Tests.ps1` | `Get-IntuneSettingsCatalogSnapshot.ps1` end to end |
 | `Restore.Script.Tests.ps1` | `Restore-IntunePolicy.ps1` end to end, asserting on the exact POST body |
-| `ImportDatabase.Functions.Tests.ps1` | `Import-PolicyHistoryToDatabase.ps1`, plus drift detection against the backup script's copies |
-| `ExportSummary.Functions.Tests.ps1` | `Export-PolicySummary.ps1`, plus drift detection on assignment rendering |
+| `ImportDatabase.Functions.Tests.ps1` | `Import-PolicyHistoryToDatabase.ps1`, plus drift detection against the backup script's remaining copies (`ConvertTo-FlatSettings` and the definition-resolution family) |
+| `ExportSummary.Functions.Tests.ps1` | The shared assignment rendering as `Export-PolicySummary.ps1` uses it. Was a drift test between three copies until Issue #15 made them one function (D-018) |
 | `Toolkit.PureFunctions.Tests.ps1` | `MDMWinsOverGPToolKit/`'s pure helper functions (`Normalize-PolicyName`, `Get-TokenSet`, `Get-JaccardScore`, `Convert-ValueToText`), plus parity checks between the two files that each keep their own copy |
 | `SuiteIntegrity.Tests.ps1` | Guards on the suite itself, and a parse check over every `.ps1` in the repo |
 

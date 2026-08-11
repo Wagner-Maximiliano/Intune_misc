@@ -53,6 +53,15 @@ Scope is **both toolsets in full** — see D-008.
 - [ ] **Extract a shared PowerShell module** — see ARCHITECTURE. Scripts
       become thin CLI wrappers over module functions; the console calls the
       same functions. No logic may live only in a script.
+      **Started (2026-08-11, D-018)**: `modules/Continuum.Core` exists and
+      holds the seven self-contained duplicates; all five scripts import it,
+      and two guards stop a local copy shadowing it. **Still to do**: the
+      eight cache-dependent duplicates (`ConvertTo-FlatSettings` and the
+      definition/name-resolution family), which need an owner for the three
+      caches and an injected resolver for `Get-SettingDefinition` — that
+      function genuinely differs between the two scripts and must not be
+      merged as-is. Then `Continuum.PolicyBackup`, then the scripts become
+      real wrappers.
 - [ ] Unify logging, config, and data-root resolution across both toolsets.
       **Not a merge of two implementations**, as previously assumed: only the
       MDM toolkit has `Write-Log` (and `$PSScriptRoot`/`ProgramData` paths).
@@ -100,7 +109,8 @@ and configuration mechanism.
 `MDMWinsOverGPToolKit/`'s pure functions too — the Excel and SQLite paths, the
 toolkit's ADMX/HTML parsers, and anything touching a live device are still
 uncovered (`docs/PROJECT_STATUS.md` known issue #12). "Importable" is what
-Issue #15 delivers.*
+Issue #15 delivers — and it has begun: seven functions are importable from
+`Continuum.Core` today, the rest still live in scripts.*
 
 ---
 

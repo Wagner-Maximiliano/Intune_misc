@@ -4,19 +4,33 @@
 Update it in the same commit as any change. If this file and the code
 disagree, the code is right and this file is a bug.
 
-- **Last updated**: 2026-07-30
-- **Updated by**: a session that ran the deliberate-break acceptance test on a
-  real interpreter, found the suite was right to stay green (the chosen break
-  was a no-op), corrected the wrong premise behind review finding R-02, and
-  closed Issue #14
-- **Current phase**: Phase 0 — Bootstrap & consolidation (review and tests done,
-  **#14 closed**, module extraction next)
+- **Last updated**: 2026-08-11
+- **Updated by**: a session that shipped the first slice of the module
+  extraction (Issue #15) — `modules/Continuum.Core`, seven functions, verified
+  green and verified red on four deliberate breaks
+- **Current phase**: Phase 0 — Bootstrap & consolidation (review and tests
+  done, **#14 closed**, **#15 started — first slice landed, more to do**)
 
-> **⚠️ An agent session on this machine can run PowerShell.** Windows PowerShell
-> 5.1 with Pester 6.0.1, confirmed 2026-07-30. The docs asserted the opposite
-> for months and it cost a wrong HIGH finding. **Try `Invoke-Pester ./tests`
-> before claiming anything is unverifiable.** A tenant and target devices are
-> still the user's to provide.
+> **⚠️ An agent session can run PowerShell — including in a Linux sandbox.**
+> Confirmed twice now, on different machines:
+>
+> - 2026-07-30: Windows PowerShell 5.1 + Pester 6.0.1, natively present.
+> - 2026-08-11: a Linux container with **no** `pwsh` installed. It was obtained
+>   in about two minutes: `github.com` release downloads are allowed by the
+>   egress proxy, so the PowerShell 7.4.6 linux-x64 tarball extracts and runs
+>   as-is; `powershellgallery.com` is **blocked** (403), but `api.nuget.org` is
+>   allowed and serves the same **Pester 6.0.1** package
+>   (`https://api.nuget.org/v3-flatcontainer/pester/6.0.1/pester.6.0.1.nupkg` —
+>   unzip it and point `$env:PSModulePath` at `tools/`).
+>
+> **Try it before claiming anything is unverifiable.** The docs asserted the
+> opposite for months and it cost a wrong HIGH finding. A tenant and target
+> devices are still the user's to provide.
+>
+> Caveat worth carrying: the Linux route runs **PowerShell 7**, not Windows
+> PowerShell 5.1. The suite agrees on both (137/0/2 on each), but anything
+> 5.1-specific — BOM behaviour, `Set-Content -Encoding utf8` — is only truly
+> settled on the user's machine.
 
 > ## ⚠️ Where this work lives — read before you branch
 >
@@ -69,16 +83,25 @@ tenant output** — never cite their numbers as measured results.
 
 Both toolsets are **working and in real use**. Nothing below is speculative.
 
-### Intune Policy Backup (`scripts/`, `tests/`) — ~2,100 lines
+### Intune Policy Backup (`scripts/`, `modules/`, `tests/`) — ~2,240 lines of script + module
+
+Line counts below are as of 2026-08-11 and were measured, not carried forward —
+the previous version of this table had drifted by up to 50 lines per file.
 
 | File | Lines | State |
 |---|---|---|
-| `Backup-IntunePolicies.ps1` | 751 | Working. Graph API snapshot → JSON + per-policy Excel history. |
-| `Import-PolicyHistoryToDatabase.ps1` | 673 | Working. **SQLite history DB** (Phase 6a). |
-| `Restore-IntunePolicy.ps1` | 234 | Working (Phase 5). |
-| `Get-IntuneSettingsCatalogSnapshot.ps1` | 233 | Working. |
-| `Export-PolicySummary.ps1` | 120 | Working. |
-| `tests/` (Pester) | ~1,200 | **Rewritten** (Issue #14). Exercises production code; see `tests/README.md`. |
+| `Backup-IntunePolicies.ps1` | 728 | Working. Graph API snapshot → JSON + per-policy Excel history. |
+| `Import-PolicyHistoryToDatabase.ps1` | 678 | Working. **SQLite history DB** (Phase 6a). |
+| `Restore-IntunePolicy.ps1` | 235 | Working (Phase 5). |
+| `Get-IntuneSettingsCatalogSnapshot.ps1` | 228 | Working. |
+| `Export-PolicySummary.ps1` | 121 | Working. |
+| `modules/Continuum.Core/` | 246 | **New** (Issue #15, D-018). Seven shared functions; all five scripts import it. |
+| `tests/` (Pester) | ~2,500 | **Rewritten** (Issue #14). Exercises production code; see `tests/README.md`. |
+
+**The scripts are no longer standalone files.** Each one now imports
+`modules/Continuum.Core`, located relative to `$PSScriptRoot`, so `scripts/`
+and `modules/` must stay siblings — copying a single `.ps1` elsewhere no longer
+works. Every script header used to claim the opposite and has been corrected.
 
 Detailed roadmap and a long list of concrete improvement prompts already
 exist in **`docs/IMPROVED-PLAN.md`** (744 lines) — that document is still
@@ -113,7 +136,7 @@ Full documentation: `MDMWinsOverGPToolKit/README.md`.
 |---|---|---|---|
 | ~~1~~ | ~~Full code review, both toolsets~~ — **done**, see `docs/REVIEW-PHASE0.md` | [#13](https://github.com/Wagner-Maximiliano/Intune_misc/issues/13) | — |
 | ~~2~~ | ~~Fix the test suite so it tests production code~~ — **done and closed 2026-07-30**. 137 passed / 0 failed / 2 skipped, and the deliberate-break round-trip is confirmed. | [#14](https://github.com/Wagner-Maximiliano/Intune_misc/issues/14) | #13 ✅ |
-| 3 | Extract shared `Continuum.*` modules — **now genuinely unblocked** | [#15](https://github.com/Wagner-Maximiliano/Intune_misc/issues/15) | #13 ✅, #14 ✅ |
+| 3 | Extract shared `Continuum.*` modules — **started 2026-08-11; first slice landed, still open** | [#15](https://github.com/Wagner-Maximiliano/Intune_misc/issues/15) | #13 ✅, #14 ✅ |
 | ~~4~~ | ~~Fix garbled `MDMWinsOverGPToolKit/README.md` intro~~ — **done** | [#16](https://github.com/Wagner-Maximiliano/Intune_misc/issues/16) | — (independent) |
 
 ---
@@ -125,6 +148,10 @@ the top of this list and work down.** Everything here is either additive (new
 code paths, no change to working behaviour) or documentation-only, so none of
 it needs the Pester suite to have been run first. Take one item, finish it
 properly, update the docs, commit.
+
+**The single highest-value item is not in this table: it is the next slice of
+#15**, described under "Where #15 got to" below. The list here is the
+self-contained alternative work.
 
 | Order | Task | Why it's safe to do now |
 |---|---|---|
@@ -187,19 +214,54 @@ caveat.
 
 ---
 
-When #15 does become unblocked, two things are already scaffolded for it:
+### Where #15 got to, and what the next slice is
 
-- `tests/TestSupport.ps1`'s AST loader is **temporary**. When the logic moves
-  into `Continuum.*`, replace `Import-ProductionFunction` with `Import-Module`;
-  the tests themselves should barely change. Note its stated limit: functions
-  loaded by AST have no `$PSScriptRoot`, so bringing path portability into
-  `scripts/` (known issue #7) needs the module route.
-- The drift tests in `ImportDatabase.Functions.Tests.ps1` and
-  `ExportSummary.Functions.Tests.ps1` compare the deliberate duplicate copies
-  of `ConvertTo-FlatSettings`, `Get-PolicyContentHash` and the assignment
-  renderer. Those tests are what the extraction is *for*; when the copies
-  collapse into `Continuum.Core`, they become redundant and should be deleted
-  rather than left asserting a tautology.
+**Done (2026-08-11, D-018).** `modules/Continuum.Core` holds seven functions,
+moved **verbatim** out of `scripts/`: `Write-TextFile`, `ConvertFrom-JsonFile`,
+`Get-MgGraphAllPages`, `Get-SafeFileName`, `Get-StringSha256`,
+`Get-PolicyContentHash`, `Format-AssignmentList`. Seventeen duplicate
+definitions became seven. All five scripts import it. `Get-PolicyContentHash`'s
+output was diffed against the pre-change copy across five inputs — identical,
+so **no stored hash moved and R-15 is untouched**.
+
+**Next slice, in order — this is the biggest remaining item on the board:**
+
+1. **Decide who owns the three caches.** `$DefinitionCache`, `$GroupNameCache`
+   and `$FilterNameCache` are declared at *file scope* in the scripts. A module
+   function cannot see its caller's script scope, so `Get-GroupDisplayName`,
+   `Get-AssignmentFilterName`, `Resolve-Assignment`,
+   `Add-SettingDefinitionToCache`, `Resolve-SettingTitle`, `Resolve-ChoiceValue`
+   and `ConvertTo-FlatSettings` cannot simply be moved. Either `Continuum.Core`
+   owns them (with a reset function per run) or they are passed in.
+2. **Design the definition resolver.** `Get-SettingDefinition` is **genuinely
+   different** in the two scripts and must not be merged: the backup fetches
+   from Graph, the database import is offline by design and always returns
+   `$null`. It needs an injected resolver — the backup passes its Graph one,
+   the import passes none.
+3. Only then move `ConvertTo-FlatSettings` and its family. Its parity tests in
+   `ImportDatabase.Functions.Tests.ps1` are what the extraction is *for*; when
+   the copies collapse, delete them rather than leave them asserting a
+   tautology. (The `Format-AssignmentGroup` parity tests were deleted on
+   exactly that basis in this change.)
+
+Do **not** shortcut steps 1–2 by dot-sourcing a shared `.ps1` instead of a
+module — that is rejected in D-018 and re-creates the coupling #15 exists to
+remove.
+
+**Two scaffolds behaved as predicted:**
+
+- `tests/TestSupport.ps1`'s AST loader is being replaced by `Import-Module`
+  exactly as planned — `Import-ContinuumModule` is the new helper, and the
+  tests that switched needed only their loader line changed. The AST loader
+  stays for everything still in `scripts/`. Its limit still bites: AST-loaded
+  functions have no `$PSScriptRoot`, and the scripts now use `$PSScriptRoot` to
+  find the module, so path-dependent behaviour must be tested through the
+  whole-script route.
+- Two new guards in `SuiteIntegrity.Tests.ps1` protect the extraction: no
+  script may define a function a module exports (a re-added local copy would
+  **shadow** the module's silently), and a script calling a module function
+  must contain a real `Import-Module` statement. Both were verified to fail
+  when violated.
 
 **Two things are waiting on the user.** Neither blocks items B–E above:
 
@@ -268,6 +330,17 @@ breaks, delete the **outer `@()`** on that line instead, or delete the
 `tests/Toolkit.PureFunctions.Tests.ps1` has now been exercised and passes,
 including under its `Set-StrictMode -Version 2.0`.
 
+### 1b. The module extraction (D-018) — what a real run still needs to confirm
+
+The suite covers this well (140/0/2, and verified red on four breaks), but the
+suite is offline and, this time, ran on **PowerShell 7 on Linux**. Two things
+it cannot settle:
+
+| What to test | Expected result |
+|---|---|
+| Any script in `scripts/` on **Windows PowerShell 5.1**, from any working directory | It finds and imports `modules/Continuum.Core` and behaves exactly as before. The module is located from `$PSScriptRoot`, which is new in `scripts/`. |
+| `Import-PolicyHistoryToDatabase.ps1` over an **existing** history database | **No new version rows for unchanged policies.** This is the one that would show a content-hash shift. It should not happen — the hash was diffed against the pre-change code across five inputs and is identical — but it is the failure that would matter most, so it is worth one deliberate look. |
+
 ### 2. Outstanding tenant checks — from the review (commit `8ab55c1`) and this one
 
 | What to test | Expected result | Covers |
@@ -316,13 +389,15 @@ already fixed — is in **`docs/REVIEW-PHASE0.md`**, indexed R-01…R-16.
    write is suppressed, so "both configured" is self-contradictory for a real
    conflict. A secondary `MdmWinningProvider` promotion path was added to
    partially address it; **its real-world effect has never been confirmed.**
-4. ~~**Nothing is verifiable in the agent sandbox.**~~ **No longer true on this
-   machine** (2026-07-30): an agent session ran Windows PowerShell 5.1 and
-   Pester 6.0.1 directly and executed the full suite. A tenant and target
-   devices are still the user's to provide, so Graph-facing and device-facing
-   behaviour remains desk-checked. **Check for an interpreter before claiming
-   you have none** — assuming otherwise is what let R-02 stay wrong for four
-   sessions. See AGENT_ONBOARDING §2.
+4. ~~**Nothing is verifiable in the agent sandbox.**~~ **Not true on either
+   machine tried so far.** 2026-07-30: Windows PowerShell 5.1 + Pester 6.0.1,
+   natively present. 2026-08-11: a Linux container with no `pwsh` at all, where
+   both were fetched through the allowed egress hosts in about two minutes —
+   the recipe is at the top of this file. A tenant and target devices are still
+   the user's to provide, so Graph-facing and device-facing behaviour remains
+   desk-checked. **Check for an interpreter before claiming you have none, and
+   if there isn't one, try to get one** — assuming otherwise is what let R-02
+   stay wrong for four sessions. See AGENT_ONBOARDING §2.
 5. **Branch deletion fails with HTTP 403** from the agent environment. Merged
    branches must be deleted by the user via the GitHub UI. (An agent session
    with local `git` can delete a merged branch directly if asked — three were
@@ -431,6 +506,30 @@ commit with `git merge-base --is-ancestor`, before deleting anything.
 
 ## Recently shipped
 
+- **Issue #15, first slice — `modules/Continuum.Core` exists** (2026-08-11,
+  D-018). Seven duplicated helpers moved verbatim out of `scripts/`; seventeen
+  definitions became seven; all five scripts import the module. `_Suite: 140
+  passed, 0 failed, 2 skipped_` (PowerShell 7.4.6 / Pester 6.0.1 on Linux — see
+  the interpreter note at the top of this file).
+  **Verified, not assumed:**
+  - `Get-PolicyContentHash` output diffed against the pre-change copy at `HEAD`
+    across five inputs including the legacy R-15 shape — **all identical**, so
+    no stored hash moved.
+  - Four deliberate breaks, each confirmed to turn the suite red and each
+    reverted: a shadowing local copy of a module function; a changed hash
+    canonical form; a deleted `Import-Module` line; and (before the fix) the
+    original weak version of the import guard.
+  **The break tests found two real gaps, both now closed:**
+  - **Every hash test was relative** — backup vs import, seeded vs unseeded —
+    so changing the canonical string moved both sides equally and stayed green.
+    A stored identity had nothing pinning it. Three golden-value tests now do,
+    computed from the pre-extraction code so they anchor to shipped behaviour.
+  - **The first import guard passed on a broken script**, because it searched
+    for the string `Continuum.Core`, which still appears in the path variable
+    and the comments. It now requires a real `Import-Module` statement.
+  **Behaviour change to know about**: the scripts are no longer standalone
+  files — see "Current state" above. **Not done**: the eight cache-dependent
+  duplicates; see "Where #15 got to" for why and what they need first.
 - **Issue #14 closed, and R-02 corrected in the process** (2026-07-30). The
   deliberate-break acceptance step was run on a real interpreter and appeared to
   fail — the suite stayed at 135/0/2 with the break in place. It was not a stale

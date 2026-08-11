@@ -65,6 +65,7 @@ blind.
 |---|---|
 | `MDMWinsOverGPToolKit/` (3 files) | `Set-StrictMode -Version 2.0` in all three |
 | `scripts/` (5 files) | **none** — only `$ErrorActionPreference = 'Stop'` |
+| `modules/Continuum.Core` | **none** — matches `scripts/`, which is where its code came from (D-018) |
 | `tests/Toolkit.PureFunctions.Tests.ps1` | `Set-StrictMode -Version 2.0` — matches the toolkit it tests (D-016) |
 | `tests/*.Tests.ps1` (the other 7) | `Set-StrictMode -Off` — matches `scripts/` |
 | `tests/TestSupport.ps1` | **none** — it is dot-sourced, so it must not impose a mode on its caller |
@@ -146,7 +147,17 @@ the review, because the distinguishing behaviour is invisible to desk-checking.
 **Try to run it. The cost of trying is one command; the cost of assuming was
 four sessions of confident, wrong documentation.**
 
-If there genuinely is no interpreter in your environment, then the old rule
+**And if there is no interpreter, try to get one before giving up.** On
+2026-08-11 a Linux sandbox had no `pwsh` at all; it took about two minutes.
+`github.com` release downloads are permitted, so the PowerShell 7 linux-x64
+tarball extracts and runs as-is. `powershellgallery.com` is blocked (403), but
+`api.nuget.org` is permitted and serves the identical Pester package —
+`https://api.nuget.org/v3-flatcontainer/pester/6.0.1/pester.6.0.1.nupkg`, whose
+`tools/` folder *is* the module; point `$env:PSModulePath` at a folder
+containing `Pester/6.0.1/`. Full suite: ten seconds. Note it gives you
+PowerShell 7, not 5.1, so 5.1-specific behaviour still needs the user.
+
+If there genuinely is no interpreter available, then the old rule
 applies unchanged — and note that a tenant and target devices are still the
 user's to provide either way. In that case:
 

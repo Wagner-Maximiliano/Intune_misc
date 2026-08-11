@@ -51,7 +51,13 @@ BeforeAll {
         'Resolve-ChoiceValue'
         'ConvertTo-FlatSettings'
     )
-    $script:HashFunctions = $script:FlattenFunctions + @('Get-StringSha256', 'Get-PolicyContentHash')
+    # Get-StringSha256 and Get-PolicyContentHash are no longer per-script
+    # copies: Issue #15 moved them into modules/Continuum.Core (D-018), so both
+    # tools now call one function and the hash below is computed once from
+    # shared code. What these tests still compare is real and still worth
+    # comparing - the two ConvertTo-FlatSettings copies that feed it, and the
+    # differing call-site shapes each script uses.
+    Import-ContinuumModule
 
     $script:MixedSettings = Get-Content "$PSScriptRoot/fixtures/policy-mixed.json" -Raw | ConvertFrom-Json
 
@@ -100,7 +106,9 @@ BeforeAll {
         )
         Reset-DefinitionCacheFrom -Seed $Seed
         return & {
-            . (Import-ProductionFunction -Path $ScriptPath -Name $script:HashFunctions)
+            # Only the flattening half is per-script now; Get-PolicyContentHash
+            # resolves to the one copy in Continuum.Core.
+            . (Import-ProductionFunction -Path $ScriptPath -Name $script:FlattenFunctions)
             $flat = ConvertTo-FlatSettings -Settings $Settings
             Get-PolicyContentHash -FlatSettings $flat -Assignments $Assignments
         }
@@ -144,7 +152,12 @@ Describe 'ConvertTo-FlatSettings parity between the backup and import scripts' {
     }
 }
 
-Describe 'Get-PolicyContentHash parity between the backup and import scripts' {
+Describe 'Content hash parity between the backup and import scripts' {
+
+    # NOT a tautology, even though Get-PolicyContentHash is now shared: what
+    # differs between the two tools is what they feed it - their own
+    # ConvertTo-FlatSettings copy, and their own call-site shape. Those are
+    # exactly the two things that have gone wrong here before (R-13, R-15).
 
     BeforeAll {
         $script:Assignments = @(

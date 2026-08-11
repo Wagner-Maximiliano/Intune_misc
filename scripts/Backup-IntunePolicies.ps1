@@ -10,8 +10,12 @@ JSON snapshot, and appends a new dated worksheet to each policy's Excel
 workbook ONLY when the policy has actually changed since the last run.
 Rebuilds a master _Index.xlsx and prints a run summary.
 
-This is a single, self-contained file. There is nothing else to dot-source
-and no other file it depends on.
+This script depends on ONE file in this repository: modules/Continuum.Core,
+which must stay a sibling of scripts/. It holds the helpers this file used to
+carry its own copy of (Issue #15, docs/DECISIONS.md D-018). Copying this .ps1
+somewhere on its own no longer works - take the repository, or at least
+scripts/ and modules/ together. It is imported automatically; there is still
+nothing to dot-source.
 
 MODULES REQUIRED - this script does NOT import them for you. Import these
 yourself first, once per PowerShell session, before running the script:
@@ -53,6 +57,23 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # ----------------------------------------------------------------------------
+# Shared module
+# ----------------------------------------------------------------------------
+# Write-TextFile, ConvertFrom-JsonFile, Get-MgGraphAllPages, Get-SafeFileName,
+# Get-StringSha256, Get-PolicyContentHash and Format-AssignmentList used to be
+# defined below, once here and again in the other scripts. They now live in
+# modules/Continuum.Core (Issue #15, D-018). This is the first use of
+# $PSScriptRoot in scripts/ - deliberately, to locate a repository file, not to
+# change any output path (known issue #7 is still open).
+$ContinuumCorePath = if ($PSScriptRoot) {
+    Join-Path (Join-Path (Join-Path (Split-Path -Parent $PSScriptRoot) 'modules') 'Continuum.Core') 'Continuum.Core.psd1'
+}
+if (-not $ContinuumCorePath -or -not (Test-Path -LiteralPath $ContinuumCorePath)) {
+    throw "Continuum.Core was not found (looked for '$ContinuumCorePath'). scripts/ and modules/ must stay siblings in the repository - see docs/DECISIONS.md D-018."
+}
+Import-Module $ContinuumCorePath -Force -ErrorAction Stop
+
+# ----------------------------------------------------------------------------
 # Output folders + in-memory caches
 # ----------------------------------------------------------------------------
 
@@ -74,24 +95,7 @@ $GroupNameCache  = @{}
 $FilterNameCache = @{}
 $DefinitionCache = @{}
 
-# ----------------------------------------------------------------------------
-# File I/O helpers (BOM-free JSON, so 5.1's Set-Content -Encoding utf8 quirk
-# never breaks a later ConvertFrom-Json read-back)
-# ----------------------------------------------------------------------------
-
-function Write-TextFile {
-    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][AllowEmptyString()][string]$Text)
-    $enc = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllText($Path, $Text, $enc)
-}
-
-function ConvertFrom-JsonFile {
-    param([Parameter(Mandatory)][string]$Path)
-    $raw = Get-Content -Path $Path -Raw
-    if ($raw) { $raw = $raw.TrimStart([char]0xFEFF) }
-    if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
-    return ($raw | ConvertFrom-Json)
-}
+# Write-TextFile and ConvertFrom-JsonFile: see Continuum.Core.
 
 # ----------------------------------------------------------------------------
 # Load persistent caches from previous runs
@@ -127,42 +131,7 @@ if (Test-Path $ManifestFile) {
 # Graph plumbing
 # ----------------------------------------------------------------------------
 
-function Get-MgGraphAllPages {
-    <# Pages through a Graph collection, retrying on 429 / transient 5xx. #>
-    param([Parameter(Mandatory)][string]$Uri, [int]$MaxRetries = 5)
-
-    $results = New-Object System.Collections.Generic.List[object]
-    $nextUri = $Uri
-
-    while ($nextUri) {
-        $attempt  = 0
-        $response = $null
-
-        while ($true) {
-            try {
-                $response = Invoke-MgGraphRequest -Method GET -Uri $nextUri -ErrorAction Stop
-                break
-            }
-            catch {
-                $attempt++
-                $status = $null
-                try { $status = [int]$_.Exception.Response.StatusCode } catch { }
-
-                $isTransient = ($status -eq 429) -or ($status -ge 500 -and $status -le 599)
-                if (-not $isTransient -or $attempt -gt $MaxRetries) { throw }
-
-                $delay = [int][math]::Pow(2, $attempt)   # 2,4,8,16,32 seconds
-                Write-Warning "Graph request failed (status=$status, attempt=$attempt/$MaxRetries). Retrying in ${delay}s."
-                Start-Sleep -Seconds $delay
-            }
-        }
-
-        if ($response.value) { $results.AddRange([object[]]$response.value) }
-        $nextUri = $response.'@odata.nextLink'
-    }
-
-    return $results
-}
+# Get-MgGraphAllPages: see Continuum.Core.
 
 function Get-GroupDisplayName {
     param([string]$GroupId)
@@ -379,44 +348,17 @@ function ConvertTo-FlatSettings {
 # Hashing / change detection
 # ----------------------------------------------------------------------------
 
-function Get-StringSha256 {
-    param([Parameter(Mandatory)][string]$Text)
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
-        return ([System.BitConverter]::ToString($sha.ComputeHash($bytes)) -replace '-', '').ToLowerInvariant()
-    }
-    finally { $sha.Dispose() }
-}
-
-function Get-PolicyContentHash {
-    <# Stable hash over flattened settings + assignments - NOT display names, so a Microsoft-side rename doesn't create a spurious version. #>
-    # AllowNull/AllowEmptyCollection is load-bearing, for the same reason it is
-    # on ConvertTo-FlatSettings above, one link further down the chain:
-    # ConvertTo-FlatSettings returns a List[object], PowerShell enumerates an
-    # IEnumerable on output, so a policy with no settings makes the caller's
-    # $flat $null - and a bare Mandatory parameter rejects that at bind time,
-    # before the body runs. Fixing only ConvertTo-FlatSettings moved the crash
-    # from line 672 to line 673 (docs/REVIEW-PHASE0.md R-13).
-    # The body tolerates $null: piping it yields a single canonical '=' line,
-    # identically in Import-PolicyHistoryToDatabase.ps1's copy, so an empty
-    # policy still hashes deterministically and the two tools agree.
-    param([Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()]$FlatSettings, $Assignments)
-
-    $settingLines = @($FlatSettings | ForEach-Object { "$($_.Path)=$($_.RawValue)" } | Sort-Object)
-    $assignLines  = @(@($Assignments) | ForEach-Object { "$($_.AssignmentType)|$($_.GroupId)|$($_.FilterId)|$($_.FilterType)" } | Sort-Object)
-    $canonical = ($settingLines -join "`n") + "`n##ASSIGNMENTS##`n" + ($assignLines -join "`n")
-    return Get-StringSha256 -Text $canonical
-}
+# Get-StringSha256 and Get-PolicyContentHash: see Continuum.Core.
+#
+# The canonical string Get-PolicyContentHash builds is a STORED IDENTITY -
+# changing it re-versions every affected policy on the next ingest. That is why
+# open finding R-15 is still open; it is the user's call (D-011).
 
 # ----------------------------------------------------------------------------
 # Naming helpers
 # ----------------------------------------------------------------------------
 
-function Get-SafeFileName {
-    param([Parameter(Mandatory)][string]$Name)
-    return ($Name -replace '[\\/:*?"<>|]', '_').Trim()
-}
+# Get-SafeFileName: see Continuum.Core.
 
 function Get-VersionSheetName {
     param([datetime]$Date = (Get-Date), [string[]]$ExistingNames = @())
@@ -433,20 +375,7 @@ function Get-WorkbookPath {
     return (Join-Path $XlsxPath ("{0}__{1}.xlsx" -f $safe, $Snapshot.Id))
 }
 
-function Format-AssignmentList {
-    param($Assignments, [switch]$Exclude)
-    $items = @($Assignments) | Where-Object { $_.IsExclude -eq [bool]$Exclude -and $_.GroupId }
-    if (-not $items) {
-        if (-not $Exclude) {
-            $special = @($Assignments) | Where-Object { -not $_.GroupId -and -not $_.IsExclude } | ForEach-Object { $_.AssignmentType }
-            if ($special) { return ($special -join ', ') }
-        }
-        return ''
-    }
-    return (($items | ForEach-Object {
-        if ($_.FilterName) { "$($_.GroupName) [filter: $($_.FilterName)/$($_.FilterType)]" } else { $_.GroupName }
-    }) -join ', ')
-}
+# Format-AssignmentList: see Continuum.Core.
 
 # ----------------------------------------------------------------------------
 # Excel export (requires the ImportExcel module - see header comment)

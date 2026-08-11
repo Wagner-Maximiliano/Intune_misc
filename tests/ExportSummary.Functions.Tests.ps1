@@ -1,15 +1,21 @@
 #requires -Modules Pester
 
 <#
-    Tests for scripts/Export-PolicySummary.ps1.
+    Tests for the assignment rendering that scripts/Export-PolicySummary.ps1
+    uses, which now lives in modules/Continuum.Core.
 
-    That script is almost entirely a main body ending in Export-Excel, so only
-    its one function is unit-testable offline: Format-AssignmentGroup, which is
-    a third copy of the assignment rendering that Backup-IntunePolicies.ps1 and
-    Restore-IntunePolicy.ps1 both call Format-AssignmentList. Its comment says
-    "Same rendering used by Backup-IntunePolicies.ps1 / Export-PolicySummary.ps1".
-    The parity test below is what makes that claim true rather than aspirational
-    - the two names differ, so both copies can be loaded side by side here.
+    HISTORY, because this file used to be a parity test. Three files rendered
+    assignments: Backup-IntunePolicies.ps1 and Restore-IntunePolicy.ps1 called
+    it Format-AssignmentList, and Export-PolicySummary.ps1 had the same body
+    under the name Format-AssignmentGroup. The parity Describe here existed to
+    stop those copies drifting apart without anyone noticing.
+
+    Issue #15 collapsed all three into one function (docs/DECISIONS.md D-018),
+    so the parity tests were deleted rather than left asserting that a function
+    equals itself - docs/PROJECT_STATUS.md called for exactly that when the
+    copies went away. The behavioural assertions below are kept verbatim: they
+    were written against the summary script's rendering and are now the shared
+    function's contract.
 
     The Excel export itself needs the ImportExcel module and is not covered.
     See docs/PROJECT_STATUS.md.
@@ -17,19 +23,14 @@
     Run:  Invoke-Pester ./tests
 #>
 
-# See Backup.Functions.Tests.ps1: scripts/ has no StrictMode (R-01).
+# See Backup.Functions.Tests.ps1: scripts/ has no StrictMode (R-01), and
+# Continuum.Core sets none either, matching the code that moved into it.
 Set-StrictMode -Off
 
 BeforeAll {
     . "$PSScriptRoot/TestSupport.ps1"
 
-    . (Import-ProductionFunction `
-            -Path (Get-ProductionScriptPath -Name 'Export-PolicySummary.ps1') `
-            -Name 'Format-AssignmentGroup')
-
-    . (Import-ProductionFunction `
-            -Path (Get-ProductionScriptPath -Name 'Backup-IntunePolicies.ps1') `
-            -Name 'Format-AssignmentList')
+    Import-ContinuumModule
 
     $script:Assignments = @(
         [pscustomobject]@{ AssignmentType = 'groupAssignmentTarget'; IsExclude = $false; GroupId = 'g1'; GroupName = 'Sales'; FilterId = $null; FilterName = $null; FilterType = 'none' }
@@ -38,54 +39,35 @@ BeforeAll {
     )
 }
 
-Describe 'Format-AssignmentGroup' {
+Describe 'Format-AssignmentList, as Export-PolicySummary.ps1 uses it' {
 
     It 'renders included groups with their filters' {
-        Format-AssignmentGroup -Assignments $script:Assignments |
+        Format-AssignmentList -Assignments $script:Assignments |
             Should -Be 'Sales, HR [filter: Corp/include]'
     }
 
     It 'renders excluded groups only when asked' {
-        Format-AssignmentGroup -Assignments $script:Assignments -Exclude | Should -Be 'Kiosks'
+        Format-AssignmentList -Assignments $script:Assignments -Exclude | Should -Be 'Kiosks'
     }
 
     It 'surfaces group-less targets such as allDevices on the include side' {
         $special = @([pscustomobject]@{ AssignmentType = 'allLicensedUsersAssignmentTarget'; IsExclude = $false; GroupId = $null; GroupName = $null; FilterId = $null; FilterName = $null; FilterType = 'none' })
-        Format-AssignmentGroup -Assignments $special | Should -Be 'allLicensedUsersAssignmentTarget'
+        Format-AssignmentList -Assignments $special | Should -Be 'allLicensedUsersAssignmentTarget'
     }
 
     It 'returns an empty string for an unassigned policy' {
-        Format-AssignmentGroup -Assignments @() | Should -Be ''
+        Format-AssignmentList -Assignments @() | Should -Be ''
     }
 
     It 'returns an empty string when Assignments is $null (a pre-R-02 snapshot)' {
-        Format-AssignmentGroup -Assignments $null | Should -Be ''
-    }
-}
-
-Describe 'Format-AssignmentGroup parity with Format-AssignmentList' {
-
-    # Three files render assignments; two of them are copies. Until Issue #15
-    # collapses them into Continuum.Core, this is what stops them diverging
-    # without anyone noticing.
-
-    It 'renders included groups the same way as the backup script' {
-        Format-AssignmentGroup -Assignments $script:Assignments |
-            Should -Be (Format-AssignmentList -Assignments $script:Assignments)
+        Format-AssignmentList -Assignments $null | Should -Be ''
     }
 
-    It 'renders excluded groups the same way as the backup script' {
-        Format-AssignmentGroup -Assignments $script:Assignments -Exclude |
-            Should -Be (Format-AssignmentList -Assignments $script:Assignments -Exclude)
-    }
-
-    It 'agrees on an unassigned policy' {
-        Format-AssignmentGroup -Assignments @() | Should -Be (Format-AssignmentList -Assignments @())
-        Format-AssignmentGroup -Assignments $null | Should -Be (Format-AssignmentList -Assignments $null)
-    }
-
-    It 'agrees on a group-less target' {
+    It 'keeps a group-less target out of the exclude side' {
+        # Previously only covered indirectly, by the parity comparison against
+        # the backup script's copy. Asserted directly now that there is one
+        # function to assert about.
         $special = @([pscustomobject]@{ AssignmentType = 'allDevicesAssignmentTarget'; IsExclude = $false; GroupId = $null; GroupName = $null; FilterId = $null; FilterName = $null; FilterType = 'none' })
-        Format-AssignmentGroup -Assignments $special | Should -Be (Format-AssignmentList -Assignments $special)
+        Format-AssignmentList -Assignments $special -Exclude | Should -Be ''
     }
 }

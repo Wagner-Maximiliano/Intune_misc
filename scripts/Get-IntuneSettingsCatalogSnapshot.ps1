@@ -8,8 +8,12 @@ its assignments - and writes one JSON snapshot per policy to
 <OutputPath>\json. No Excel, no versioning; see Backup-IntunePolicies.ps1 for
 that.
 
-This is a single, self-contained file. There is nothing else to dot-source
-and no other file it depends on.
+This script depends on ONE file in this repository: modules/Continuum.Core,
+which must stay a sibling of scripts/. It holds the helpers this file used to
+carry its own copy of (Issue #15, docs/DECISIONS.md D-018). Copying this .ps1
+somewhere on its own no longer works - take the repository, or at least
+scripts/ and modules/ together. It is imported automatically; there is still
+nothing to dot-source.
 
 MODULES REQUIRED - this script does NOT import them for you. Import this
 yourself first, once per PowerShell session, before running the script:
@@ -42,6 +46,21 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# ----------------------------------------------------------------------------
+# Shared module
+# ----------------------------------------------------------------------------
+# Get-MgGraphAllPages, Get-SafeFileName and Write-TextFile
+# used to be defined in this file, and again in the other scripts. They now
+# live in modules/Continuum.Core (Issue #15, D-018). $PSScriptRoot is used here
+# only to locate a repository file - no output path changed (known issue #7).
+$ContinuumCorePath = if ($PSScriptRoot) {
+    Join-Path (Join-Path (Join-Path (Split-Path -Parent $PSScriptRoot) 'modules') 'Continuum.Core') 'Continuum.Core.psd1'
+}
+if (-not $ContinuumCorePath -or -not (Test-Path -LiteralPath $ContinuumCorePath)) {
+    throw "Continuum.Core was not found (looked for '$ContinuumCorePath'). scripts/ and modules/ must stay siblings in the repository - see docs/DECISIONS.md D-018."
+}
+Import-Module $ContinuumCorePath -Force -ErrorAction Stop
+
 # Each run gets its own timestamped subfolder under json/, so re-running the
 # script never overwrites a previous run's snapshots - it's a version history
 # by folder, one run per timestamp.
@@ -56,42 +75,7 @@ $FilterNameCache = @{}
 # Helper functions
 # ----------------------------------------------------------------------------
 
-function Get-MgGraphAllPages {
-    <# Pages through a Graph collection, retrying on 429 / transient 5xx. #>
-    param([Parameter(Mandatory)][string]$Uri, [int]$MaxRetries = 5)
-
-    $results = New-Object System.Collections.Generic.List[object]
-    $nextUri = $Uri
-
-    while ($nextUri) {
-        $attempt  = 0
-        $response = $null
-
-        while ($true) {
-            try {
-                $response = Invoke-MgGraphRequest -Method GET -Uri $nextUri -ErrorAction Stop
-                break
-            }
-            catch {
-                $attempt++
-                $status = $null
-                try { $status = [int]$_.Exception.Response.StatusCode } catch { }
-
-                $isTransient = ($status -eq 429) -or ($status -ge 500 -and $status -le 599)
-                if (-not $isTransient -or $attempt -gt $MaxRetries) { throw }
-
-                $delay = [int][math]::Pow(2, $attempt)   # 2,4,8,16,32 seconds
-                Write-Warning "Graph request failed (status=$status, attempt=$attempt/$MaxRetries). Retrying in ${delay}s."
-                Start-Sleep -Seconds $delay
-            }
-        }
-
-        if ($response.value) { $results.AddRange([object[]]$response.value) }
-        $nextUri = $response.'@odata.nextLink'
-    }
-
-    return $results
-}
+# Get-MgGraphAllPages: see Continuum.Core.
 
 function Get-GroupDisplayName {
     param([string]$GroupId)
@@ -151,17 +135,7 @@ function Resolve-Assignment {
     }
 }
 
-function Get-SafeFileName {
-    param([Parameter(Mandatory)][string]$Name)
-    return ($Name -replace '[\\/:*?"<>|]', '_').Trim()
-}
-
-function Write-TextFile {
-    <# Writes UTF-8 WITHOUT a BOM (5.1's Set-Content -Encoding utf8 adds one). #>
-    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][AllowEmptyString()][string]$Text)
-    $enc = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllText($Path, $Text, $enc)
-}
+# Get-SafeFileName and Write-TextFile: see Continuum.Core.
 
 # ----------------------------------------------------------------------------
 # Main

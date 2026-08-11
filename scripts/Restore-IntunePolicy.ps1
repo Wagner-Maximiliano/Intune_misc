@@ -24,8 +24,12 @@ narrow and was fixed by design discussion - do not deviate without confirming:
      array - already-resolved group/filter names, no extra Graph calls) are
      printed to the console so you know what to re-apply manually.
 
-This is a single, self-contained file. There is nothing else to dot-source
-and no other file it depends on.
+This script depends on ONE file in this repository: modules/Continuum.Core,
+which must stay a sibling of scripts/. It holds the helpers this file used to
+carry its own copy of (Issue #15, docs/DECISIONS.md D-018). Copying this .ps1
+somewhere on its own no longer works - take the repository, or at least
+scripts/ and modules/ together. It is imported automatically; there is still
+nothing to dot-source.
 
 MODULES REQUIRED - this script does NOT import them for you. Import this
 yourself first, once per PowerShell session, before running the script:
@@ -72,35 +76,25 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # ----------------------------------------------------------------------------
+# Shared module
+# ----------------------------------------------------------------------------
+# ConvertFrom-JsonFile and Format-AssignmentList
+# used to be defined in this file, and again in the other scripts. They now
+# live in modules/Continuum.Core (Issue #15, D-018). $PSScriptRoot is used here
+# only to locate a repository file - no output path changed (known issue #7).
+$ContinuumCorePath = if ($PSScriptRoot) {
+    Join-Path (Join-Path (Join-Path (Split-Path -Parent $PSScriptRoot) 'modules') 'Continuum.Core') 'Continuum.Core.psd1'
+}
+if (-not $ContinuumCorePath -or -not (Test-Path -LiteralPath $ContinuumCorePath)) {
+    throw "Continuum.Core was not found (looked for '$ContinuumCorePath'). scripts/ and modules/ must stay siblings in the repository - see docs/DECISIONS.md D-018."
+}
+Import-Module $ContinuumCorePath -Force -ErrorAction Stop
+
+# ----------------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------------
 
-function ConvertFrom-JsonFile {
-    <# Reads a JSON file, stripping a leading BOM if present (5.1's
-       Set-Content -Encoding utf8 adds one, which breaks ConvertFrom-Json). #>
-    param([Parameter(Mandatory)][string]$Path)
-    $raw = Get-Content -Path $Path -Raw
-    if ($raw) { $raw = $raw.TrimStart([char]0xFEFF) }
-    if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
-    return ($raw | ConvertFrom-Json)
-}
-
-function Format-AssignmentList {
-    <# Same rendering used by Backup-IntunePolicies.ps1 / Export-PolicySummary.ps1:
-       "GroupName [filter: FilterName/FilterType], ...". #>
-    param($Assignments, [switch]$Exclude)
-    $items = @($Assignments) | Where-Object { $_.IsExclude -eq [bool]$Exclude -and $_.GroupId }
-    if (-not $items) {
-        if (-not $Exclude) {
-            $special = @($Assignments) | Where-Object { -not $_.GroupId -and -not $_.IsExclude } | ForEach-Object { $_.AssignmentType }
-            if ($special) { return ($special -join ', ') }
-        }
-        return ''
-    }
-    return (($items | ForEach-Object {
-        if ($_.FilterName) { "$($_.GroupName) [filter: $($_.FilterName)/$($_.FilterType)]" } else { $_.GroupName }
-    }) -join ', ')
-}
+# ConvertFrom-JsonFile and Format-AssignmentList: see Continuum.Core.
 
 # ----------------------------------------------------------------------------
 # Load + validate the snapshot

@@ -24,7 +24,16 @@ BeforeAll {
     $script:RepoRoot   = Split-Path -Parent $PSScriptRoot
     $script:ScriptsDir = Join-Path $script:RepoRoot 'scripts'
     $script:ToolkitDir = Join-Path $script:RepoRoot 'MDMWinsOverGPToolKit'
+    $script:ModulesDir = Join-Path $script:RepoRoot 'modules'
     $script:TestsDir   = $PSScriptRoot
+
+    # Every .psm1 under modules/ (Issue #15). Kept as a list so these guards
+    # extend to Continuum.PolicyBackup and friends without further edits.
+    $script:ModuleFiles = @(
+        if (Test-Path -LiteralPath $script:ModulesDir) {
+            Get-ChildItem -LiteralPath $script:ModulesDir -Filter '*.psm1' -File -Recurse
+        }
+    )
 }
 
 Describe 'No test file reimplements production code' {
@@ -35,6 +44,31 @@ Describe 'No test file reimplements production code' {
         # Import-ProductionFunction instead of writing another copy.
         $production = @{}
         foreach ($file in @(Get-ChildItem -LiteralPath $script:ScriptsDir -Filter '*.ps1' -File)) {
+            foreach ($name in @(Get-ScriptFunctionName -Path $file.FullName)) {
+                $production[$name] = $file.Name
+            }
+        }
+        $production.Count | Should -BeGreaterThan 0
+
+        $offenders = @()
+        foreach ($file in @(Get-ChildItem -LiteralPath $script:TestsDir -Filter '*.ps1' -File -Recurse)) {
+            foreach ($name in @(Get-ScriptFunctionName -Path $file.FullName -IncludeNested)) {
+                if ($production.ContainsKey($name)) {
+                    $offenders += "$($file.Name) defines '$name', which is production code in $($production[$name])"
+                }
+            }
+        }
+
+        $offenders -join ' ;; ' | Should -BeNullOrEmpty
+    }
+
+    It 'defines no function name that also exists in modules/' {
+        # Same rule as for scripts/, applied to the code Issue #15 is moving
+        # into modules. A test needing one of these calls Import-ContinuumModule.
+        $script:ModuleFiles.Count | Should -BeGreaterThan 0
+
+        $production = @{}
+        foreach ($file in $script:ModuleFiles) {
             foreach ($name in @(Get-ScriptFunctionName -Path $file.FullName)) {
                 $production[$name] = $file.Name
             }
@@ -116,6 +150,78 @@ Describe 'The harness does not run production code under stricter rules than pro
     }
 }
 
+Describe 'No script shadows a function that moved into a module' {
+
+    It 'defines no function in scripts/ that a module also exports' {
+        # The failure mode this catches is silent and nasty. A function defined
+        # in a .ps1 wins over the module's copy of the same name, so re-adding
+        # a "local copy" of, say, Format-AssignmentList would shadow
+        # Continuum.Core's without any error - and the two would then drift
+        # apart exactly as the three original copies did, with the suite still
+        # green because it tests the module.
+        #
+        # This is the guard that makes the extraction stick, and it is the
+        # mechanical form of the rule in Continuum.Core's header: a function
+        # lives in one place.
+        $script:ModuleFiles.Count | Should -BeGreaterThan 0
+
+        $moduleFunctions = @{}
+        foreach ($file in $script:ModuleFiles) {
+            foreach ($name in @(Get-ScriptFunctionName -Path $file.FullName)) {
+                $moduleFunctions[$name] = $file.Name
+            }
+        }
+
+        $offenders = @()
+        foreach ($file in @(Get-ChildItem -LiteralPath $script:ScriptsDir -Filter '*.ps1' -File)) {
+            foreach ($name in @(Get-ScriptFunctionName -Path $file.FullName)) {
+                if ($moduleFunctions.ContainsKey($name)) {
+                    $offenders += "$($file.Name) defines '$name', which $($moduleFunctions[$name]) already provides - it would shadow the module copy"
+                }
+            }
+        }
+
+        $offenders -join ' ;; ' | Should -BeNullOrEmpty
+    }
+
+    It 'has every script that calls a module function actually importing that module' {
+        # A script that calls into Continuum.Core without importing it appears
+        # to work whenever something else in the same session imported the
+        # module first - which is precisely the situation inside this suite,
+        # where eight test files share one process. Deleting the Import-Module
+        # line from Backup-IntunePolicies.ps1 therefore left every test green.
+        # That is what this guard is for, and it is why it looks for a real
+        # Import-Module STATEMENT rather than a mention of the module's name:
+        # the first version of this test checked for the string 'Continuum.Core'
+        # and passed on the broken script, because the path variable and the
+        # comments above it still contained the name.
+        $moduleFunctions = @()
+        foreach ($file in $script:ModuleFiles) {
+            $moduleFunctions += @(Get-ScriptFunctionName -Path $file.FullName)
+        }
+        $moduleFunctions.Count | Should -BeGreaterThan 0
+
+        $offenders = @()
+        foreach ($file in @(Get-ChildItem -LiteralPath $script:ScriptsDir -Filter '*.ps1' -File)) {
+            $text = Get-Content -LiteralPath $file.FullName -Raw
+
+            # Calls only: a line that is entirely a comment does not count, so
+            # the "see Continuum.Core" breadcrumbs left behind by the
+            # extraction are not mistaken for uses.
+            $used = @($moduleFunctions | Where-Object {
+                    $text -match "(?m)^\s*(?!#)[^\r\n]*\b$([regex]::Escape($_))\b"
+                })
+            $imports = $text -match '(?m)^\s*Import-Module\s+\$ContinuumCorePath\b'
+
+            if ($used.Count -gt 0 -and -not $imports) {
+                $offenders += "$($file.Name) calls $($used -join ', ') but has no 'Import-Module `$ContinuumCorePath' statement"
+            }
+        }
+
+        $offenders -join ' ;; ' | Should -BeNullOrEmpty
+    }
+}
+
 Describe 'Every production script is covered' {
 
     It 'names each script in scripts/ from at least one test file' {
@@ -136,7 +242,7 @@ Describe 'Every production script is covered' {
 
 Describe 'Every PowerShell file in the repository parses' {
 
-    It 'has no syntax errors in scripts/, MDMWinsOverGPToolKit/ or tests/' {
+    It 'has no syntax errors in scripts/, modules/, MDMWinsOverGPToolKit/ or tests/' {
         # This is the mechanical half of the brace/paren balance check that
         # docs/REVIEW-PHASE0.md had to do by hand, and it is worth having: the
         # agent sandbox has no PowerShell interpreter, so a syntax error in a
@@ -144,7 +250,11 @@ Describe 'Every PowerShell file in the repository parses' {
         $files = @(
             @(Get-ChildItem -LiteralPath $script:ScriptsDir -Filter '*.ps1' -File) +
             @(Get-ChildItem -LiteralPath $script:ToolkitDir -Filter '*.ps1' -File) +
-            @(Get-ChildItem -LiteralPath $script:TestsDir   -Filter '*.ps1' -File -Recurse)
+            @(Get-ChildItem -LiteralPath $script:TestsDir   -Filter '*.ps1' -File -Recurse) +
+            @($script:ModuleFiles) +
+            @(if (Test-Path -LiteralPath $script:ModulesDir) {
+                Get-ChildItem -LiteralPath $script:ModulesDir -Filter '*.psd1' -File -Recurse
+            })
         )
         $files.Count | Should -BeGreaterThan 0
 
