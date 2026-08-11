@@ -70,9 +70,14 @@ about heavy work, not absolute.
 **StrictMode coverage is split**: `MDMWinsOverGPToolKit/` sets
 `Set-StrictMode -Version 2.0` in all three scripts; the five files in
 `scripts/` set **none** (only `$ErrorActionPreference = 'Stop'`);
-`tests/TestHelpers.ps1` uses `-Version Latest`. This file used to claim it was
-universal — see `docs/REVIEW-PHASE0.md` R-01, and R-11 before you switch it on
-anywhere.
+and under `tests/`, **each file matches the half of the codebase it
+exercises** — `Toolkit.PureFunctions.Tests.ps1` sets `-Version 2.0` like the
+toolkit it tests (D-016), the other seven `*.Tests.ps1` set `-Off` like
+`scripts/`, and `TestSupport.ps1` sets none at all because it is dot-sourced
+and must not impose a mode on its caller. A harness stricter than its subject
+reports failures that cannot happen in the field. This file used to claim
+StrictMode was universal — see `docs/REVIEW-PHASE0.md` R-01, and R-11 before
+you switch it on anywhere.
 
 Write everything as if StrictMode were on. The rules below are not style
 preferences — each one corresponds to a bug that reached a real device.

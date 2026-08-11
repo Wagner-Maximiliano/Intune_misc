@@ -39,6 +39,14 @@ R-01 immediately below, which invalidates a premise in three of our own docs.
 `scripts/` sets only `$ErrorActionPreference = 'Stop'`, which governs
 non-terminating cmdlet errors — not language-level property access.
 
+*(Update, Issue #14: `tests/TestHelpers.ps1` — the file in the table above
+carrying `-Version Latest` — has since been deleted. In the replacement suite
+each test file matches the half of the codebase it exercises: `-Off` for the
+`scripts/` tests, `-Version 2.0` for `Toolkit.PureFunctions.Tests.ps1`
+(D-016). The table is left as-is here since this document is a historical
+record of what Phase 0.1 found on disk; `docs/AGENT_ONBOARDING.md` carries the
+current one.)*
+
 **Why this matters more than a doc typo.** It splits every finding into two
 populations, and the split is not obvious from reading the code:
 

@@ -65,7 +65,14 @@ blind.
 |---|---|
 | `MDMWinsOverGPToolKit/` (3 files) | `Set-StrictMode -Version 2.0` in all three |
 | `scripts/` (5 files) | **none** — only `$ErrorActionPreference = 'Stop'` |
-| `tests/TestHelpers.ps1` | `Set-StrictMode -Version Latest` |
+| `tests/Toolkit.PureFunctions.Tests.ps1` | `Set-StrictMode -Version 2.0` — matches the toolkit it tests (D-016) |
+| `tests/*.Tests.ps1` (the other 7) | `Set-StrictMode -Off` — matches `scripts/` |
+| `tests/TestSupport.ps1` | **none** — it is dot-sourced, so it must not impose a mode on its caller |
+
+The test files are not inconsistent: **each one matches the half of the
+codebase it exercises.** A harness stricter than its subject reports failures
+that cannot happen in the field; a harness laxer than its subject misses ones
+that can.
 
 This file used to claim every script sets it. That was wrong; the table above
 is what is actually on disk (verified in the Phase 0.1 review —

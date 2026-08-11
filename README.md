@@ -200,9 +200,15 @@ titles resolve from the cached `state\definitions.json` when it's found near
 Invoke-Pester ./tests
 ```
 
-Covers settings flattening (all setting-instance shapes + raw fallback),
-content-hash stability/sensitivity, sheet-name collision handling, and manifest
-round-trip.
+Covers all five scripts in `scripts/`: settings flattening (every
+setting-instance shape, raw fallback, cached-definition resolution),
+content-hash stability/sensitivity, sheet-name collisions, assignment
+resolution, change detection across runs (created/updated/skipped), `-WhatIf`,
+platform filtering, and the restore payload (asserted against the exact POST
+body). Needs only Pester — no tenant, no credentials, no network, and neither
+`ImportExcel` nor `PSSQLite`. The same command also runs the MDM toolkit's own
+tests, which live alongside these. See `tests/README.md` for the full layout
+and what's deliberately not covered.
 
 ## Notes & limitations
 
@@ -210,7 +216,11 @@ round-trip.
   definition resolves, raw definition IDs as a fallback — it never breaks on an
   unknown setting.
 - **"Last Modified By"** comes from Intune audit events and only covers the
-  tenant's audit retention window; it is best-effort, not guaranteed.
+  tenant's audit retention window; it is best-effort, not guaranteed. It was
+  also returning nothing at all — every workbook's column was blank — until a
+  fix on this branch (R-14 in `docs/REVIEW-PHASE0.md`, unverified against a
+  real tenant). If an older workbook has a blank "Last Modified By" column,
+  that is why.
 - **Scope:** Settings Catalog policies (`deviceManagement/configurationPolicies`)
   only, for now.
 

@@ -14,6 +14,16 @@ you want, in any order, and use the matching prompt. Each prompt is written
 to stand alone: paste it into a new session with this repo attached and it
 has enough context to work without you re-explaining the project.
 
+> **Read before pasting any prompt below.** These were written before Issue #14
+> rewrote the test suite. **Every reference to `tests/TestHelpers.ps1` or
+> `tests/IntuneBackup.Tests.ps1` is stale — both files are deleted.** The
+> current suite is described in `tests/README.md`, and D-012 in
+> `docs/DECISIONS.md` governs how tests are allowed to reach production code:
+> load the real function with `Import-ProductionFunction`, or run the whole
+> script against `Enable-FakeGraph`. Never copy production code into a test —
+> `tests/SuiteIntegrity.Tests.ps1` fails the run if you do. Items 1 and 6 are
+> already resolved; both are marked in place.
+
 ---
 
 ## 1. Assessment (as of Phase 6a)
@@ -27,12 +37,22 @@ That's rarer than it should be.
 
 The honest weaknesses, found by re-reading the code rather than the plan:
 
-1. **The tests don't test the production code.** `tests/TestHelpers.ps1` is a
+1. **[RESOLVED — Issue #14] The tests don't test the production code.**
+   `tests/TestHelpers.ps1` is deleted; the suite now loads real production
+   code via AST extraction and whole-script runs against a fake Graph (see
+   `tests/README.md` and D-012). With the TestHelpers copy gone the logic
+   lives in **three** places, not four — Backup, Import-DB, and
+   Restore/Export-PolicySummary share the assignment renderer — and Issue #15
+   (moving logic into `Continuum.*` modules) collapses the rest.
+
+   *Original text, for the record:* "`tests/TestHelpers.ps1` is a
    hand-maintained *mirror* of the logic in `Backup-IntunePolicies.ps1` (its
-   own header admits this). The flattening/hashing logic now lives in
-   **four places** (Backup, Import-DB, Restore shares Format-AssignmentList,
+   own header admits this). The flattening/hashing logic now lives in **four
+   places** (Backup, Import-DB, Restore shares Format-AssignmentList,
    TestHelpers). Tests can pass while the real script is broken, and the
-   copies can silently drift — this is the single biggest structural risk.
+   copies can silently drift — this is the single biggest structural risk."
+   That assessment was right, and it under-sold the cost: four real bugs
+   shipped behind a green run before it was acted on.
 2. **Snapshots silently drop two real policy fields.** The Graph policy
    object carries `roleScopeTagIds` (scope tags) and `templateReference`
    (endpoint-security/template-based policies), and the backup doesn't store
@@ -329,7 +349,29 @@ secrets on read, by design).
 
 ### Engineering practices & tooling
 
-#### 6. AST-based tests + parity test (kill the TestHelpers mirror) — Medium
+#### 6. AST-based tests + parity test (kill the TestHelpers mirror) — Medium — **DONE (Issue #14)**
+
+This recommendation's approach was followed: production functions are now
+loaded by parsing the real `.ps1` with the PowerShell AST and re-declaring
+them from their extent, exactly as proposed below. The result is
+`Import-ProductionFunction` in `tests/TestSupport.ps1` (see `tests/README.md`,
+D-012). Two differences from what this item proposed:
+
+1. The suite went further than a parity test and also added whole-script runs
+   against a fake Graph (`Enable-FakeGraph`) — running the real script end to
+   end and inspecting what it wrote to disk. That is what actually caught the
+   two bugs found during the rewrite (R-13, R-14 in `docs/REVIEW-PHASE0.md`),
+   not the AST-extracted unit tests alone.
+2. `tests/TestHelpers.ps1` was deleted outright rather than shrunk to just the
+   extraction/loading mechanism.
+
+This item's warning below — that dot-sourcing production scripts had been
+deliberately rejected earlier in this project after causing "function not
+recognized" failures — was honoured: no test hook or dot-source was added to
+any production script.
+
+**Everything below this line is the original item, unedited, as a historical
+record of what was proposed and why. Its present tense no longer holds.**
 
 `tests/TestHelpers.ps1` is a hand-copied duplicate of logic from
 `Backup-IntunePolicies.ps1`. The two can drift silently: a real bug fixed in
@@ -337,7 +379,7 @@ the production script might never get mirrored into the test copy, so tests
 keep passing against stale logic. This is the highest-leverage engineering
 change available in this project.
 
-> **Prompt:**
+> **Prompt (historical — see resolution above):**
 > "I'm working on the Intune Policy Backup project in
 > Wagner-Maximiliano/Intune_misc, branch off `main`. Read README.md,
 > `scripts/Backup-IntunePolicies.ps1`, `tests/TestHelpers.ps1`, and
