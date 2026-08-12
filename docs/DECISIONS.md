@@ -494,6 +494,86 @@ drift silently, exactly the failure mode D-012 exists to prevent.
 
 ---
 
+## D-019 — Two parallel lines: standalone 1.x and module-based **Continuum 2.0**, both fully maintained
+
+- **Date**: 2026-08-11
+- **Status**: Decided (by user)
+
+**Decision.** The module-based system created in D-018 is called **Continuum
+2.0** and is developed on its own long-lived branch. The standalone,
+single-file version continues to exist and is **fully maintained in parallel** —
+the user was shown the cheaper options and chose this one explicitly.
+
+| Line | Branch | What it is |
+|---|---|---|
+| **1.x — standalone** | `claude/platform-bootstrap` | Every script in `scripts/` is a self-contained `.ps1`. Copy one file to a machine and run it. All Phase 0 fixes and the full Pester suite. |
+| **2.0 — module-based** | `claude/platform-bootstrap-project-status-566lsg` | Everything 1.x has, plus `modules/Continuum.Core`. Scripts import the module and are **not** copy-one-file portable. |
+
+**"Continuum 2.0", not "Intune Toolkit 2.0".** The user's first suggestion was
+*Intune Toolkit 2.0*; they changed it to *Continuum 2.0* on being shown that it
+would have collided with D-006, where **Continuum** names the whole platform
+across both toolsets. 2.0 is therefore a **version of Continuum**, not a rival
+product name, and **D-006 stands unchanged** — the modules stay `Continuum.*`.
+
+**`main` is NOT the 1.x line.** Measured 2026-08-11: `main` is ~849 lines
+behind `claude/platform-bootstrap` on `scripts/` and `tests/`, missing every
+Phase 0 crash fix (R-02, R-03, R-13, R-14) and the entire rewritten test suite.
+Its only `docs/` file is `IMPROVED-PLAN.md`. **Do not treat `main` as "the
+stable standalone version" and do not fix bugs there** thinking you are
+maintaining 1.x.
+
+**`MDMWinsOverGPToolKit/` is shared by both lines and was not touched.**
+Verified byte-for-byte identical between the two branches on 2026-08-11. The
+extraction was confined to `scripts/`, `modules/`, `tests/` and `docs/`. This
+was the user's stated priority when choosing to keep the lines separate: *do
+not disturb what is already working.* **The toolkit must stay identical on both
+branches** — it is not part of the 1.x/2.0 split, and letting it diverge would
+create a second, unintended fork of the half nobody asked to change.
+
+**Why keep both.** The 1.x property being preserved is real and is the reason
+these scripts get used at all: a single `.ps1` can be dropped onto a machine, or
+run by Intune/SCCM/RMM, with nothing else alongside it. 2.0 deliberately gives
+that up (D-018) in exchange for one copy of each function, which is what the
+console in Phase 1 needs (D-002, D-005). Neither property is wrong; the user
+wants both, and is accepting the price for it.
+
+**The price, accepted — read this before touching either branch.** Fully
+maintained in parallel means **every fix to shared logic must be applied
+twice**, and the two copies can drift silently. That is the *exact* failure
+this project has already had once: `tests/TestHelpers.ps1` held copies of 21
+production functions, they drifted, and four real bugs shipped behind a green
+run (Issue #14). D-018 has just finished removing that at function level; this
+decision reintroduces it at **branch level**, with the user's eyes open.
+
+Nothing mechanical can catch cross-branch drift the way
+`SuiteIntegrity.Tests.ps1` catches in-repo copies, so it falls to process:
+
+1. **Fix logic on the 1.x branch first**, where the function is still a plain
+   script function, then port to 2.0. Fixing 2.0 first is how a fix silently
+   never reaches 1.x.
+2. **Both branches run the same Pester suite.** Run it on both before calling a
+   fix done, and say in the commit message that you did.
+3. **State in every commit message which lines the change reached** — "1.x
+   only", "both", "2.0 only". A future session cannot infer it.
+4. **Never let `MDMWinsOverGPToolKit/` differ between the branches.** If it
+   does, that is a bug, not a feature.
+
+**Rejected.**
+- *Freeze 1.x, fix only real bugs there, put new features on 2.0 only.* This
+  was the recommended option: it keeps the escape hatch open at a fraction of
+  the maintenance cost. Declined — the user wants both lines fully capable.
+- *Retire the standalone scripts entirely.* Cheapest and cleanest, one line to
+  maintain. Declined: it breaks anyone who copies a single `.ps1` onto a
+  machine, which is how these tools actually get deployed.
+- *Merge 2.0 into `main` and keep no standalone line.* Same objection, and it
+  would have made the "not standalone" behaviour change unavoidable for every
+  existing user at once.
+- *Rename the product to "Intune Toolkit 2.0".* Would have overturned D-006 and
+  named the whole platform after only one of its two toolsets. The user
+  redirected to *Continuum 2.0* instead.
+
+---
+
 ## D-018 — `Continuum.Core` starts with the self-contained duplicates only; the cache-dependent family stays in `scripts/` until its ownership is designed
 
 **Date**: 2026-08-11 · **Context**: Issue #15, first slice

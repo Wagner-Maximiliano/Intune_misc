@@ -16,9 +16,20 @@ exists, which means two things:
 
 Paste this into a fresh session:
 
-> Check out `claude/platform-bootstrap`, read `docs/AGENT_ONBOARDING.md`, then
-> follow it. Work on the next item in `docs/PROJECT_STATUS.md` unless I tell
-> you otherwise.
+> Check out `<branch>`, read `docs/AGENT_ONBOARDING.md`, then follow it. Work
+> on the next item in `docs/PROJECT_STATUS.md` unless I tell you otherwise.
+
+**Fill in `<branch>` — there are two live lines (D-019), and they are not
+interchangeable:**
+
+| Line | Branch | Use it when |
+|---|---|---|
+| **1.x — standalone** | `claude/platform-bootstrap` | The scripts must stay copy-one-file portable |
+| **2.0 — Continuum 2.0** | `claude/platform-bootstrap-project-status-566lsg` | Module work, and anything heading toward the console |
+
+If the task is a bug fix in logic both lines share, **start on 1.x and port to
+2.0** — fixing 2.0 first is how a fix silently never reaches 1.x. Say in the
+commit message which lines you reached.
 
 **Where "the next item" is defined.** `docs/PROJECT_STATUS.md` → "Next up" has
 a section headed **"⚡ Ready now — an agent can do these with no user input"**.
@@ -29,10 +40,12 @@ test run that has never happened.
 If the Ready-now list is empty, stop and ask rather than inventing work or
 starting something from the blocked list.
 
-**The branch step is not optional.** All project documentation lives on
-`claude/platform-bootstrap`, which is unmerged — `main` has no `docs/` folder
-at all. A session started on `main` sees none of this and will improvise.
-Drop the branch clause only once the user has merged it to `main`.
+**The branch step is not optional.** All project documentation lives on those
+two branches, both unmerged. `main` carries only `docs/IMPROVED-PLAN.md` — no
+onboarding, no status, no roadmap — so a session started there sees none of
+this and will improvise. Worse, `main` is ~849 lines behind on `scripts/` and
+`tests/`, missing every Phase 0 crash fix, so it is **not** "the stable
+standalone version" either. Drop the branch clause only once the user merges.
 
 The rest is deliberately short. Everything else lives in the repo so it
 survives context compaction, session limits, and model changes.
@@ -276,12 +289,16 @@ Then, in your final message to the user, state:
 - **Merged branches are archived** (deleted after merge). Never build on top
   of an already-merged branch — start fresh from `main`:
   `git fetch origin main && git checkout -B <branch> origin/main`
-- **Exception, while it lasts: `claude/platform-bootstrap` is unmerged and
-  holds every `docs/` file.** `main` has no documentation at all. Until the
-  user merges it, continue Phase 0 work *on that branch* — the "start fresh
-  from `main`" rule applies to **merged** branches, and following it here
-  would silently discard the project's entire memory. Once it is merged,
-  delete this bullet and go back to the normal rule.
+- **Exception, while it lasts: two unmerged branches hold everything** (D-019).
+  `claude/platform-bootstrap` is the 1.x standalone line;
+  `claude/platform-bootstrap-project-status-566lsg` is Continuum 2.0. Between
+  them they hold every `docs/` file; `main` has only `IMPROVED-PLAN.md`. Until
+  the user merges, continue Phase 0 work on the appropriate one — the "start
+  fresh from `main`" rule applies to **merged** branches, and following it here
+  would silently discard the project's entire memory *and* every Phase 0 fix.
+- **`MDMWinsOverGPToolKit/` must stay byte-identical on both branches.** It is
+  shared, it is deliberately outside the 1.x/2.0 split, and the 2.0 work did
+  not touch it. If it ever differs between them, that is a bug.
 - **PRs**: only when the user asks. Include what was tested vs. desk-checked.
 - **Commits**: explain *why*, not just what. This project's commit history is
   used as evidence when debugging regressions months later.

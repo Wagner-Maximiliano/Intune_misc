@@ -53,6 +53,10 @@ Scope is **both toolsets in full** — see D-008.
 - [ ] **Extract a shared PowerShell module** — see ARCHITECTURE. Scripts
       become thin CLI wrappers over module functions; the console calls the
       same functions. No logic may live only in a script.
+      **This applies to the Continuum 2.0 line only** (D-019). The 1.x
+      standalone line keeps its self-contained scripts on purpose and is
+      maintained in parallel, so anything below that changes shared logic has
+      to land on both.
       **Started (2026-08-11, D-018)**: `modules/Continuum.Core` exists and
       holds the seven self-contained duplicates; all five scripts import it,
       and two guards stop a local copy shadowing it. **Still to do**: the

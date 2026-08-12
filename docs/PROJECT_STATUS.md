@@ -34,21 +34,40 @@ disagree, the code is right and this file is a bug.
 
 > ## ⚠️ Where this work lives — read before you branch
 >
-> All Phase 0 work is on **`claude/platform-bootstrap`**, which is **not merged
-> and has no open PR**. `main` does **not** contain `docs/` at all — no
-> onboarding, no status, no roadmap. An agent that starts from `main` will find
-> none of this and will have no idea the project exists.
+> **There are now TWO parallel lines, both maintained (D-019).** Pick the right
+> one before you write anything.
 >
-> **Start every session with:**
+> | Line | Branch | What it is |
+> |---|---|---|
+> | **1.x — standalone** | `claude/platform-bootstrap` | Every script in `scripts/` is a self-contained `.ps1` you can copy to a machine and run. |
+> | **2.0 — Continuum 2.0** | `claude/platform-bootstrap-project-status-566lsg` | Same, plus `modules/Continuum.Core`. Scripts import the module and are **not** copy-one-file portable. |
+>
 > ```
+> # 1.x (standalone)
 > git fetch origin claude/platform-bootstrap && git checkout claude/platform-bootstrap
+>
+> # 2.0 (module-based)
+> git fetch origin claude/platform-bootstrap-project-status-566lsg && git checkout claude/platform-bootstrap-project-status-566lsg
 > ```
 >
-> This is the one place the usual convention ("never build on a merged branch;
-> start fresh from `main`") does **not** apply — that rule is about *merged*
-> branches. This one is unmerged and is the only copy of the project's memory.
-> Keep working on it until the user merges it, then follow the normal rule
-> again.
+> **If you are fixing a bug in shared logic, do it on 1.x first and then port to
+> 2.0** — fixing 2.0 first is how a fix silently never reaches 1.x. Say in the
+> commit message which lines your change reached. See D-019 for the full rule.
+>
+> **`main` is neither line.** It is ~849 lines behind on `scripts/` and
+> `tests/`, missing every Phase 0 crash fix and the whole rewritten test suite;
+> its only `docs/` file is `IMPROVED-PLAN.md`, so there is no onboarding, status
+> or roadmap there. An agent that starts from `main` will have no idea the
+> project exists — **and must not "fix 1.x" there.**
+>
+> Both branches are unmerged with no open PR. This is the one place the usual
+> convention ("never build on a merged branch; start fresh from `main`") does
+> **not** apply — that rule is about *merged* branches, and these are the only
+> copies of the project's memory.
+>
+> **`MDMWinsOverGPToolKit/` must stay byte-identical on both branches.** It is
+> shared, it was deliberately not touched by the 2.0 work, and it is not part of
+> the split. If it ever differs between the branches, that is a bug.
 
 ---
 
@@ -487,8 +506,9 @@ already fixed — is in **`docs/REVIEW-PHASE0.md`**, indexed R-01…R-16.
 
 | Branch | State | What to do |
 |---|---|---|
-| `main` | — | Has **no `docs/`**. Do not start a session here. |
-| `claude/platform-bootstrap` | Unmerged, no PR. **All Phase 0 work + every doc.** | Keep working here. The user was asked on 2026-07-30 about merging and chose to leave it unmerged for now, so the "check out this branch first" instruction in `AGENT_ONBOARDING.md` **still stands**. |
+| `main` | ~849 lines behind on `scripts/`+`tests/`; only `docs/IMPROVED-PLAN.md` | Do not start a session here, and **do not treat it as the stable standalone version** — it lacks every Phase 0 crash fix (R-02, R-03, R-13, R-14) and the rewritten suite. |
+| `claude/platform-bootstrap` | Unmerged, no PR. **The 1.x standalone line** + every doc. | Live branch (D-019). Scripts here stay self-contained. Fix shared logic here **first**, then port to 2.0. |
+| `claude/platform-bootstrap-project-status-566lsg` | Unmerged, no PR. **Continuum 2.0** — 1.x plus `modules/Continuum.Core`. | Live branch (D-019). Where the module extraction (#15) continues. Named after an auto-generated slug; rename is the user's call. |
 | `claude/intune-gpo-policy-binding-7m496u` | Unmerged, no PR, untriaged | See known issue #15. Not abandoned, not approved — parked. |
 
 **Deleted on 2026-07-30** after confirming their content was in `main`:

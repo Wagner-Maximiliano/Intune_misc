@@ -46,7 +46,18 @@ Quick map:
 3. **Never commit to `main`.** Branch as `claude/<short-topic>`.
 4. **Never build on a merged branch.** Start fresh:
    `git fetch origin main && git checkout -B <branch> origin/main`
-5. **Only open a PR when the user asks.**
+   **Exception that currently applies to almost everything**: the two live
+   lines below are unmerged and hold all the docs and every Phase 0 fix, so
+   branch from the relevant one, not from `main`.
+5. **Know which of the two lines you are on** (D-019). `claude/platform-bootstrap`
+   is **1.x**, where every script in `scripts/` stays a self-contained `.ps1`
+   you can copy to a machine. `claude/platform-bootstrap-project-status-566lsg`
+   is **Continuum 2.0**, which adds `modules/Continuum.Core` and is *not*
+   copy-one-file portable. Both are fully maintained, so a fix to shared logic
+   goes to **1.x first, then ported to 2.0** — and say which lines you reached
+   in the commit message. `MDMWinsOverGPToolKit/` must stay byte-identical on
+   both. `main` is neither line and is ~849 lines behind; never "fix 1.x" there.
+6. **Only open a PR when the user asks.**
 
 ---
 

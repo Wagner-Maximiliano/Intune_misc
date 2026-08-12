@@ -141,6 +141,12 @@ deployed to devices and run under Intune/SCCM/RMM.
 
 ### Module split
 
+**This section describes Continuum 2.0 only.** Per D-019 there are two
+maintained lines: the 1.x standalone line, where every script in `scripts/` is
+a self-contained `.ps1` with no module at all, and Continuum 2.0, described
+here. `MDMWinsOverGPToolKit/` is shared, identical on both, and outside the
+split.
+
 **Status: `Continuum.Core` exists** at `modules/Continuum.Core`, holding the
 first seven functions (D-018). The table below is still the target; what is in
 the module today is a subset of the `Core` row.
