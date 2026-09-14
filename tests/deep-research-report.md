@@ -235,16 +235,124 @@ Fallback order:
 
 ## Key primary sources
 
-Microsoft, Changes to API behavior for Wi-Fi access and location. This is the definitive root-cause document and explicitly lists the affected WLAN calls plus Microsoft's `GetConnectedSsid()` recommendation. citeturn14search1
+1. Microsoft, Changes to API behavior for Wi-Fi access and location
 
-Microsoft, `WlanConnectionProfileDetails.GetConnectedSsid()`. Documents the SSID-only API. citeturn14search2
+This was the most important source. Microsoft confirms Windows now restricts Wi-Fi APIs capable of exposing BSSID/location data unless precise location access is allowed. It also lists the affected APIs and recommends an SSID-only alternative.
 
-Microsoft, `WlanQueryInterface`. Documents the Native Wi-Fi interface and links the API to the fall 2024 behavior change. citeturn14search9
+[https://learn.microsoft.com/en-us/windows/win32/nativewifi/wi-fi-access-location-changes](https://learn.microsoft.com/en-us/windows/win32/nativewifi/wi-fi-access-location-changes)
 
-Microsoft, Windows.Devices.WiFi. Documents the current location-consent requirement around BSSID-sensitive Wi-Fi functionality. citeturn14search5
+2. Cisco ThousandEyes, Installing the Endpoint Agent on Windows
 
-Microsoft, Privacy Policy CSP. Documents enterprise `LetAppsAccessLocation` and per-app ForceAllow/ForceDeny/UserInControl controls. citeturn18search0
+ThousandEyes explicitly confirms the Windows 11 24H2 behavior. It states Location Services should be enabled for accurate SSID/BSSID reporting, otherwise Endpoint Agent can show Unknown SSID and Unknown BSSID.
 
-Microsoft, Windows WLAN architecture and troubleshooting. Documents the relationship among WLAN APIs, WLAN AutoConfig, the Native Wi-Fi stack and miniport drivers. citeturn19view3
+[https://docs.thousandeyes.com/product-documentation/global-vantage-points/endpoint-agents/installing/windows/install-the-endpoint-agent-on-windows](https://docs.thousandeyes.com/product-documentation/global-vantage-points/endpoint-agents/installing/windows/install-the-endpoint-agent-on-windows)
 
-Cisco ThousandEyes, Installing the Endpoint Agent on Windows. Explicitly documents the Windows 11 24H2+ Location Services requirement and `Unknown SSID`/`Unknown BSSID` result when it is unavailable. citeturn13search3
+3. Microsoft, WlanConnectionProfileDetails.GetConnectedSsid()
+
+Microsoft documents the alternative API for obtaining only the currently connected SSID. This is important because Microsoft specifically recommends it when an application only needs the SSID rather than BSSID or nearby Wi-Fi information.
+
+[https://learn.microsoft.com/en-us/uwp/api/windows.networking.connectivity.wlanconnectionprofiledetails.getconnectedssid?view=winrt-28000](https://learn.microsoft.com/en-us/uwp/api/windows.networking.connectivity.wlanconnectionprofiledetails.getconnectedssid?view=winrt-28000)
+
+4. Microsoft, WlanConnectionProfileDetails class
+
+Supporting documentation for the SSID-only Windows networking interface. It helps establish the supported Windows API path ThousandEyes could potentially use instead of an API requiring precise-location access.
+
+[https://learn.microsoft.com/en-us/uwp/api/windows.networking.connectivity.wlanconnectionprofiledetails?view=winrt-28000](https://learn.microsoft.com/en-us/uwp/api/windows.networking.connectivity.wlanconnectionprofiledetails?view=winrt-28000)
+
+5. Microsoft, WlanQueryInterface
+
+This API can return information about the current wireless connection, including data associated with SSID/BSSID. Microsoft specifically documents newer location restrictions around some uses of this API, making it a plausible API behind the ThousandEyes issue.
+
+[https://learn.microsoft.com/en-us/windows/win32/api/wlanapi/nf-wlanapi-wlanqueryinterface](https://learn.microsoft.com/en-us/windows/win32/api/wlanapi/nf-wlanapi-wlanqueryinterface)
+
+6. Microsoft, WlanGetNetworkBssList
+
+This retrieves BSS information from Wi-Fi networks. Windows 24H2 restricts access because BSSID information can be used to determine a device's physical location.
+
+[https://learn.microsoft.com/en-us/windows/win32/api/wlanapi/nf-wlanapi-wlangetnetworkbsslist](https://learn.microsoft.com/en-us/windows/win32/api/wlanapi/nf-wlanapi-wlangetnetworkbsslist)
+
+7. Microsoft, WlanScan
+
+This documents the Native Wi-Fi scanning API. It is one of the Wi-Fi operations affected by Microsoft's newer location privacy controls.
+
+[https://learn.microsoft.com/en-us/windows/win32/api/wlanapi/nf-wlanapi-wlanscan](https://learn.microsoft.com/en-us/windows/win32/api/wlanapi/nf-wlanapi-wlanscan)
+
+8. Microsoft, Windows.Devices.WiFi
+
+This documents the modern Windows Wi-Fi API surface. It confirms Wi-Fi functionality involving scanning/BSSID is tied into Windows capability and location permission controls.
+
+[https://learn.microsoft.com/en-us/uwp/api/windows.devices.wifi?view=winrt-26100](https://learn.microsoft.com/en-us/uwp/api/windows.devices.wifi?view=winrt-26100)
+
+9. Microsoft, Privacy Policy CSP
+
+This is the key Intune/MDM policy reference. It documents settings such as LetAppsAccessLocation and ForceAllow/ForceDeny application lists, which are relevant if you test enabling Location Services while restricting which apps can consume location.
+
+[https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-privacy](https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-privacy)
+
+10. Microsoft, System Policy CSP
+
+This documents device-level location policy controls, including AllowLocation and the associated Windows policies. Useful for understanding the difference between allowing the Windows location feature and granting individual applications access.
+
+[https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-system](https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-system)
+
+11. Microsoft, ADMX Sensors Policy CSP
+
+This covers policies such as Turn off location and related Location and Sensors settings. It helps identify whether an existing GPO or Intune policy is disabling location at a higher level.
+
+[https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-admx-sensors](https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-admx-sensors)
+
+12. Microsoft, Wireless network connectivity troubleshooting
+
+Useful for understanding the Windows Wi-Fi architecture. It shows WLAN APIs and WLAN AutoConfig sit above the wireless driver, supporting the conclusion that this issue is primarily an OS privacy/API restriction rather than an Intel/Qualcomm/Wi-Fi driver regression.
+
+[https://learn.microsoft.com/en-us/troubleshoot/windows-client/networking/wireless-network-connectivity-issues-troubleshooting](https://learn.microsoft.com/en-us/troubleshoot/windows-client/networking/wireless-network-connectivity-issues-troubleshooting)
+
+13. Microsoft, 802.1X authentication troubleshooting
+
+This documents the WLAN AutoConfig Operational event log. That log is useful during your testing to prove Windows remains connected normally even while ThousandEyes loses access to SSID/BSSID data.
+
+[https://learn.microsoft.com/en-us/troubleshoot/windows-client/networking/802-1x-authentication-issues-troubleshooting](https://learn.microsoft.com/en-us/troubleshoot/windows-client/networking/802-1x-authentication-issues-troubleshooting)
+
+14. Microsoft, WiFiCx OID_WDI_TASK_SCAN
+
+This shows lower-level Wi-Fi drivers still obtain BSS scan information normally. It supports the conclusion that the restriction occurs higher up in the Windows user-mode API/privacy layer.
+
+[https://learn.microsoft.com/en-us/windows-hardware/drivers/netcx/oid-wdi-task-scan](https://learn.microsoft.com/en-us/windows-hardware/drivers/netcx/oid-wdi-task-scan)
+
+15. Microsoft, Overview of NDIS Driver Types
+
+Supporting source for Windows networking architecture. It helped rule out NDIS itself as the likely cause of the ThousandEyes SSID change.
+
+[https://learn.microsoft.com/en-us/windows-hardware/drivers/network/ndis-drivers](https://learn.microsoft.com/en-us/windows-hardware/drivers/network/ndis-drivers)
+
+16. Microsoft Q&A, Native Wi-Fi "Access is denied"
+
+A user reported Native Wi-Fi API calls returning Access Denied under the newer Windows behavior. Enabling Location Services restored access, which closely matches your ThousandEyes symptoms.
+
+[https://learn.microsoft.com/en-us/answers/questions/3910051/system-componentmodel-win32exception-0x80004005-ac](https://learn.microsoft.com/en-us/answers/questions/3910051/system-componentmodel-win32exception-0x80004005-ac)
+
+17. Microsoft Tech Community, 24H2 location activity
+
+Users noticed changed location-related behavior after upgrading to Windows 11 24H2. It provides community confirmation that the feature release changed how location and Wi-Fi-related access is surfaced/enforced.
+
+[https://techcommunity.microsoft.com/discussions/windows11/after-upgrading-to-24h2-a-location-acquisition-process-appeared-in-the-lower-rig/4447664/replies/4448640](https://techcommunity.microsoft.com/discussions/windows11/after-upgrading-to-24h2-a-location-acquisition-process-appeared-in-the-lower-rig/4447664/replies/4448640)
+
+18. Reddit r/Intune, 24H2 changed Location Services state
+
+Admins discuss 24H2 systems showing Location capability state as Deny and attempts to control it through Intune/registry settings. Useful as real-world evidence, but I would treat it as community information rather than authoritative documentation.
+
+[https://www.reddit.com/r/Intune/comments/1o6o1xr/updating_from_22h2_to_24h2_turned_location/](https://www.reddit.com/r/Intune/comments/1o6o1xr/updating_from_22h2_to_24h2_turned_location/)
+
+19. Reddit r/SCCM, Windows 11 24H2 Location Services
+
+Admins discuss registry and command-based approaches for enabling Location Services on managed 24H2 systems. The important finding is most successful "workarounds" actually turn Location back on rather than giving one desktop application a true exception while Location stays disabled.
+
+[https://www.reddit.com/r/SCCM/comments/1rmsh5g/windows_11_24h2_location_services_off_by_default/](https://www.reddit.com/r/SCCM/comments/1rmsh5g/windows_11_24h2_location_services_off_by_default/)
+
+20. MSEndpointMgr, Location Services is grayed out
+
+Enterprise-focused article covering Intune location controls and Force Allow application configuration. Relevant to your possible compromise of enabling the underlying location service while limiting application access.
+
+[https://msendpointmgr.com/2026/02/10/location-services-is-grayed-out/](https://msendpointmgr.com/2026/02/10/location-services-is-grayed-out/)
+
+The three sources I would put at the top of your internal investigation are Microsoft’s Wi-Fi location change document, the ThousandEyes Windows Endpoint Agent document, and the Microsoft GetConnectedSsid API document. Together they establish the cause, ThousandEyes' current supported position, and the most interesting possible SSID-only solution.
